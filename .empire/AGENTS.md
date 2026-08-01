@@ -1176,3 +1176,29 @@ Damit ist der CRM-Schreibpfad komplett: **kein API-User kann noch fremde Datens�
 
 - **n8n beachtet `settings.timezone` sehr wohl.** Die buzz#28-Notiz („Crons laufen UTC, das `timezone`-Feld wird still ignoriert") stimmt nur für Workflows **ohne** `settings.timezone` — die fallen auf die Instanz-Vorgabe zurück, und die ist hier `GENERIC_TIMEZONE=UTC`. Gemessen am 01.08.: `[E2E] funnel-probe` hat `settings.timezone: Europe/Berlin`, sein Cron `45 6 * * *` feuerte um **04:45 UTC** = 06:45 CEST; `[BUZZ-28] espo-acl-drift` hat kein `timezone`, sein `20 5 * * *` ist echtes 05:20 UTC. Folge: der Wächter wandert im Winter auf 06:20 Ortszeit, der Probe nicht. (Für **Buzz**-Workflows bleibt die UTC-Regel gültig — das ist ein anderer Scheduler.)
 - **`n8n_update_partial_workflow` (MCP) kann diese Workflows nicht schreiben.** `validateOnly: true` geht durch, das Anwenden scheitert mit `request/body must NOT have additional properties`: die n8n-Public-API weist die Read-only-Felder zurück, die ihr eigener GET liefert. Umweg, der funktioniert: GET, in JS patchen, `PUT` mit **nur** `name`/`nodes`/`connections`/`settings` (`tools/patch-funnel-probe-claim.mjs`). Nebenbei: ein `\u2014` im `notes`-Feld einer `addNode`-Operation kippt dieselbe Validierung — Node-Notizen ASCII halten.
+
+## `-32603 Internal error` sagt jetzt, was los ist (buzz#39 — `error.data` überlebt)
+
+Der Fix ist fünf Zeilen Logik plus Schutzräder: `agent_error_from_json` (`crates/buzz-acp/src/acp.rs`) hängt ein vorhandenes `data` an die Fehlermeldung an, **auch wenn `message` schon ein String ist**. Genau das war die Lücke — der Doc-Kommentar versprach seit jeher, providerspezifisches Detail nicht zu verlieren, aber der Fallback griff nur, wenn `message` **fehlte**. Das ist der seltene Fall; der häufige ist `message: "Internal error"` mit der ganzen Wahrheit in `data`.
+
+Vorher im Agent-Log: `Agent reported error (code -32603): Internal error` — achtmal hintereinander, ohne einen Hinweis. Nachher steht die Ursache in derselben Zeile (`… — You've hit your usage limit … ({"codexErrorInfo":"usageLimitExceeded"})`). Das ist der Befund aus buzz#18, der dort ~40 Minuten gekostet hat.
+
+**Drei Entscheidungen, die nicht offensichtlich sind:**
+
+- **Zwei getrennte Längenkappen** statt einer: `data.message` bis 500 Zeichen, der Rest der Felder bis 200 — und der Rest kommt **nach** der gekappten Nachricht. Mit einer gemeinsamen Kappe frisst ein geschwätziges `data.message` genau das kurze Feld auf, nach dem man später greppt (`codexErrorInfo`, `kind`, `retry_after`). Der Test `agent_error_from_json_truncates_chatty_data` fixiert das mit 5.000 Zeichen Müll und prüft, dass `overflow` überlebt.
+- **Maskiert wird rekursiv und case-insensitiv** (`token`, `access_token`, `refresh_token`, `api_key`, `authorization` → `***`). Fehlermeldungen landen in Logs; `data` ist adapterdefiniert und darf Credentials enthalten. Der Test prüft auch ein verschachteltes `Authorization`.
+- **Gekürzt wird auf Zeichen-, nicht auf Byte-Grenzen.** `data` ist beliebiger Provider-Text und routinemäßig nicht-ASCII — ein `&s[..500]` würde bei einem Umlaut panicken.
+
+**Upstream-PR-fähig: ja, bewusst so geschnitten.** Keine Signaturänderung an `AcpError::AgentError`, keine neue Crate, keine Änderung am Retry-/Backoff-Verhalten, ausschließlich additiv in einer Datei. Der Rust-Teil liegt in einem **eigenen Commit ohne `.empire/`-Anteil** — ein Cherry-Pick nach `block/buzz` ist damit ein Einzeiler. Die PR selbst ist bewusst **nicht** abgefeuert: heute ist schon einmal versehentlich eine PR bei Upstream gelandet (block/buzz#4095, sofort geschlossen); ein zweiter ungefragter Aufschlag am selben Tag wäre schlechter Stil. Eigenes Ticket.
+
+### Beweisstand (2026-08-01)
+
+| Prüfung | Ergebnis |
+|---|---|
+| `cargo fmt -p buzz-acp -- --check` | sauber |
+| `cargo clippy -p buzz-acp --all-targets -- -D warnings` | keine Funde |
+| Neue Unit-Tests (7) | grün — u. a. der **echte** codex-acp-Payload aus buzz#18, Meldung enthält `usageLimitExceeded` |
+| **Rot-Probe** — dieselben Tests gegen den alten Code | **5 FAILED**, und exakt die vier Tests, die unverändertes Verhalten fixieren, bleiben grün (`message`-only, `message`-only mit `data: null`, Fallback ohne `message`, `data`-only) |
+| `cargo nextest run -p buzz-acp --no-fail-fast` | 666 passed, 10 failed |
+
+**Zu den 10 roten Tests — gemessen, nicht weggeredet:** sie hängen alle an gespawnten Fake-Agenten (`/bin/bash: syntax error near unexpected token` in den Test-Fixtures) bzw. an Zeitfenstern, keiner berührt `agent_error_from_json`. 9 davon fallen auf dem **unveränderten** Baseline-Stand identisch um (mit `git stash` gegengeprüft); der zehnte (`acp_steer_failed_outcome_acks_outcome_rejected`) ist last-abhängig flaky und läuft isoliert mit und ohne die Änderung grün. Das ist eine Windows-Schwäche der Test-Fixtures und ein Gardener-Kandidat, kein Regressionsbefund.
