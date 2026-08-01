@@ -45,6 +45,115 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+
+    /// `BUZZ_ACP_MCP_SERVERS` was unusable. The message never echoes the value:
+    /// the JSON carries per-server `env`, which is exactly where API keys live.
+    #[error("invalid BUZZ_ACP_MCP_SERVERS: {0}")]
+    McpServers(String),
+}
+
+/// Upper bound on stdio MCP servers handed to one ACP session. Mirrors
+/// `buzz_agent::mcp::MAX_MCP_SERVERS` — buzz-agent rejects anything above it
+/// with `too many MCP servers`, which surfaces as a dead session rather than a
+/// config error. Checking here turns that into a startup failure with a name.
+pub const MAX_MCP_SERVERS: usize = 16;
+
+/// One extra stdio MCP server, as declared in `BUZZ_ACP_MCP_SERVERS`.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerSpec {
+    /// Display name. Defaults to the command's file stem — the same rule the
+    /// single-server path already uses for `--mcp-command`.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment for this server ONLY. Nothing is inherited from buzz-acp's
+    /// own relay credentials — see `parse_mcp_servers` for why.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Derive the display name for a server from an explicit name or the command.
+/// Kept public so `build_mcp_servers` uses one rule for every server instead
+/// of two that can drift apart.
+pub fn mcp_server_name(explicit: Option<&str>, command: &str) -> String {
+    if let Some(n) = explicit {
+        let n = n.trim();
+        if !n.is_empty() {
+            return n.to_string();
+        }
+    }
+    std::path::Path::new(command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mcp")
+        .to_string()
+}
+
+/// Parse and validate `BUZZ_ACP_MCP_SERVERS`.
+///
+/// `base_command` is `--mcp-command` when set. It counts toward the cap and
+/// toward name uniqueness, because buzz-agent sees one flat list.
+///
+/// **Security boundary:** extra servers deliberately receive no relay
+/// credentials. `--mcp-command` gets `BUZZ_PRIVATE_KEY` because it *is* the
+/// agent's own dev-mcp, speaking to the relay as the agent. An arbitrary
+/// third-party server (a vault reader, a CRM client) has no such role, and
+/// handing it the agent's secret key would let any of them post as the agent.
+/// Extra servers therefore see only the `env` they declare.
+pub fn parse_mcp_servers(
+    raw: &str,
+    base_command: Option<&str>,
+) -> Result<Vec<McpServerSpec>, ConfigError> {
+    let base_command = base_command.filter(|c| !c.trim().is_empty());
+    let already_configured = usize::from(base_command.is_some());
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(vec![]);
+    }
+    let specs: Vec<McpServerSpec> = serde_json::from_str(raw).map_err(|e| {
+        // Only the serde message, never `raw`: the value contains secrets.
+        ConfigError::McpServers(format!(
+            "expected a JSON array of {{name?, command, args?, env?}} — {e}"
+        ))
+    })?;
+
+    for (i, s) in specs.iter().enumerate() {
+        if s.command.trim().is_empty() {
+            return Err(ConfigError::McpServers(format!(
+                "server #{i} has an empty command"
+            )));
+        }
+    }
+
+    let total = already_configured + specs.len();
+    if total > MAX_MCP_SERVERS {
+        return Err(ConfigError::McpServers(format!(
+            "{total} servers configured ({already_configured} from --mcp-command, {} from this list) — the limit is {MAX_MCP_SERVERS}",
+            specs.len()
+        )));
+    }
+
+    // Duplicate names are worse than an error: buzz-agent keys its tool
+    // registry by server name, so a collision silently shadows the tools of
+    // whichever server lost the race. Fail loudly instead.
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Some(base) = base_command {
+        seen.insert(mcp_server_name(None, base));
+    }
+    for s in &specs {
+        let name = mcp_server_name(s.name.as_deref(), &s.command);
+        if !seen.insert(name.clone()) {
+            return Err(ConfigError::McpServers(format!(
+                "duplicate server name {name:?} — names must be unique, tools are addressed by them"
+            )));
+        }
+    }
+
+    Ok(specs)
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -260,6 +369,27 @@ pub struct CliArgs {
 
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
+
+    /// Additional stdio MCP servers as a JSON array, e.g.
+    /// `[{"name":"vault","command":"npx","args":["obsidian-mcp"],"env":{"API_KEY":"…"}}]`.
+    ///
+    /// Additive to `--mcp-command`, which stays the first server. `name` is
+    /// optional and defaults to the command's file stem. Only `command` is
+    /// required. The agent-side cap is 16 servers per session
+    /// (`buzz_agent::mcp::MAX_MCP_SERVERS`); exceeding it is a startup error
+    /// here rather than a session failure later.
+    ///
+    /// `hide_env_values` is set although the name matches none of the
+    /// KEY/SECRET/TOKEN patterns the `secret_env_args_hide_their_values_in_help`
+    /// lint scans for: the *value* is secret-bearing (per-server `env`), not the
+    /// name. Without this, `--help` prints every downstream API key.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_MCP_SERVERS",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub mcp_servers: String,
 
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
@@ -495,6 +625,9 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    /// Extra stdio MCP servers from `BUZZ_ACP_MCP_SERVERS`, already parsed and
+    /// validated at startup — an unusable value never reaches a live session.
+    pub mcp_servers: Vec<McpServerSpec>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1053,12 +1186,15 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let mcp_servers = parse_mcp_servers(&args.mcp_servers, Some(args.mcp_command.as_str()))?;
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            mcp_servers,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1123,12 +1259,19 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} extra_mcp=[{}] idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
+            // NAMES ONLY. The specs carry per-server `env`, i.e. API keys —
+            // this line is printed at startup and lands in the agent log.
+            self.mcp_servers
+                .iter()
+                .map(|s| mcp_server_name(s.name.as_deref(), &s.command))
+                .collect::<Vec<_>>()
+                .join(","),
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
@@ -1437,6 +1580,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            mcp_servers: vec![],
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -2927,5 +3071,138 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+}
+
+// -------------------------------------------------------------------- buzz#8
+#[cfg(test)]
+mod mcp_servers_parse_tests {
+    use super::*;
+
+    const BASE: Option<&str> = Some("buzz-dev-mcp");
+
+    fn parse(raw: &str) -> Result<Vec<McpServerSpec>, ConfigError> {
+        parse_mcp_servers(raw, BASE)
+    }
+
+    fn err(raw: &str) -> String {
+        parse(raw)
+            .expect_err("should have been rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn empty_value_means_no_extra_servers() {
+        assert!(parse("").unwrap().is_empty());
+        assert!(parse("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_server_parses_with_all_fields() {
+        let s = parse(
+            r#"[{"name":"vault","command":"npx","args":["-y","obsidian-mcp"],"env":{"K":"v"}}]"#,
+        )
+        .unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].name.as_deref(), Some("vault"));
+        assert_eq!(s[0].command, "npx");
+        assert_eq!(s[0].args, vec!["-y", "obsidian-mcp"]);
+        assert_eq!(s[0].env.get("K").map(String::as_str), Some("v"));
+    }
+
+    #[test]
+    fn only_command_is_required() {
+        let s = parse(r#"[{"command":"/opt/bin/espo-mcp"}]"#).unwrap();
+        assert!(s[0].name.is_none());
+        assert!(s[0].args.is_empty());
+        assert!(s[0].env.is_empty());
+        assert_eq!(
+            mcp_server_name(s[0].name.as_deref(), &s[0].command),
+            "espo-mcp"
+        );
+    }
+
+    #[test]
+    fn fifteen_extra_servers_fit_next_to_the_primary() {
+        let list: Vec<String> = (0..15)
+            .map(|i| format!(r#"{{"name":"s{i}","command":"c{i}"}}"#))
+            .collect();
+        let raw = format!("[{}]", list.join(","));
+        assert_eq!(
+            parse(&raw).unwrap().len(),
+            15,
+            "1 primary + 15 extras == 16"
+        );
+    }
+
+    #[test]
+    fn sixteen_extra_servers_exceed_the_cap_when_a_primary_exists() {
+        let list: Vec<String> = (0..16)
+            .map(|i| format!(r#"{{"name":"s{i}","command":"c{i}"}}"#))
+            .collect();
+        let raw = format!("[{}]", list.join(","));
+        let msg = err(&raw);
+        assert!(msg.contains("17 servers configured"), "got: {msg}");
+        assert!(msg.contains("limit is 16"), "got: {msg}");
+
+        // Without a primary the same list is fine — the cap counts the total,
+        // not the list.
+        assert_eq!(parse_mcp_servers(&raw, None).unwrap().len(), 16);
+        assert_eq!(parse_mcp_servers(&raw, Some("  ")).unwrap().len(), 16);
+    }
+
+    #[test]
+    fn malformed_json_is_rejected_without_echoing_the_value() {
+        let canary = "CANARY-MUST-NOT-APPEAR";
+        let raw = format!(r#"[{{"command":"x","env":{{"TOKEN_A":"{canary}"}}}},]"#);
+        let msg = err(&raw);
+        assert!(
+            !msg.contains(canary),
+            "the error must never echo the value — it carries credentials. got: {msg}"
+        );
+        assert!(msg.contains("expected a JSON array"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_bare_object_is_not_a_list() {
+        assert!(err(r#"{"command":"x"}"#).contains("expected a JSON array"));
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected_rather_than_silently_dropped() {
+        // A typo'd key ("commands", "envs") would otherwise produce a server
+        // with an empty command or no env, and fail much later.
+        let msg = err(r#"[{"command":"x","envs":{"K":"v"}}]"#);
+        assert!(msg.contains("unknown field"), "got: {msg}");
+    }
+
+    #[test]
+    fn an_empty_command_is_rejected() {
+        assert!(err(r#"[{"command":""}]"#).contains("server #0 has an empty command"));
+        assert!(err(r#"[{"command":"a"},{"command":"  "}]"#).contains("server #1"));
+    }
+
+    #[test]
+    fn duplicate_names_are_rejected_because_tools_are_addressed_by_name() {
+        let msg = err(r#"[{"name":"vault","command":"a"},{"name":"vault","command":"b"}]"#);
+        assert!(msg.contains("duplicate server name"), "got: {msg}");
+
+        // Also when the collision comes from the derived name...
+        assert!(
+            err(r#"[{"command":"/x/espo-mcp"},{"command":"/y/espo-mcp"}]"#)
+                .contains("duplicate server name")
+        );
+
+        // ...and when it collides with the primary server.
+        assert!(
+            err(r#"[{"name":"buzz-dev-mcp","command":"other"}]"#).contains("duplicate server name")
+        );
+    }
+
+    #[test]
+    fn name_falls_back_to_the_command_stem_and_then_to_mcp() {
+        assert_eq!(mcp_server_name(Some("vault"), "/x/y"), "vault");
+        assert_eq!(mcp_server_name(Some("  "), "/opt/bin/espo-mcp"), "espo-mcp");
+        assert_eq!(mcp_server_name(None, "."), "mcp");
     }
 }

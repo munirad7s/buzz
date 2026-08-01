@@ -4227,16 +4227,45 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Build the MCP server list for `session/new`.
+///
+/// Two sources, in a fixed order: `--mcp-command` (the agent's own dev-mcp)
+/// stays first, then anything from `BUZZ_ACP_MCP_SERVERS`. The order is part
+/// of the contract — existing deployments that read "the MCP server" mean
+/// element 0, and nothing may push it aside.
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    let mut servers = build_primary_mcp_server(config)
+        .map(|s| vec![s])
+        .unwrap_or_default();
+
+    // Extra servers get ONLY their declared env. No relay URL, no private key,
+    // no auth tag: those belong to the agent's own dev-mcp, and handing them to
+    // a third-party server would let it act as the agent on the relay.
+    servers.extend(config.mcp_servers.iter().map(|spec| {
+        McpServer {
+            name: config::mcp_server_name(spec.name.as_deref(), &spec.command),
+            command: spec.command.clone(),
+            args: spec.args.clone(),
+            env: spec
+                .env
+                .iter()
+                .map(|(name, value)| EnvVar {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        }
+    }));
+
+    servers
+}
+
+fn build_primary_mcp_server(config: &Config) -> Option<McpServer> {
     if config.mcp_command.is_empty() {
-        return vec![];
+        return None;
     }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
+    Some(McpServer {
+        name: config::mcp_server_name(None, &config.mcp_command),
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
@@ -4281,7 +4310,7 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             }
             env
         },
-    }]
+    })
 }
 
 #[cfg(test)]
@@ -5051,6 +5080,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5235,6 +5265,96 @@ mod build_mcp_servers_tests {
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }
+
+    // ---------------------------------------------------------------- buzz#8
+    // BUZZ_ACP_MCP_SERVERS: additional stdio MCP servers alongside
+    // --mcp-command. The invariants that matter operationally are the merge
+    // ORDER (dev-mcp stays element 0) and the SECRET BOUNDARY (extra servers
+    // must not inherit the agent's relay credentials).
+
+    fn spec(name: Option<&str>, command: &str) -> config::McpServerSpec {
+        config::McpServerSpec {
+            name: name.map(str::to_string),
+            command: command.into(),
+            args: vec![],
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn extra_servers_are_appended_after_the_primary() {
+        let mut config = test_config();
+        config.mcp_servers = vec![spec(Some("vault"), "npx"), spec(None, "/usr/bin/espo-mcp")];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(
+            servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["test-mcp-server", "vault", "espo-mcp"],
+            "dev-mcp must stay element 0; extras follow in declaration order"
+        );
+    }
+
+    #[test]
+    fn extra_servers_work_without_a_primary() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.mcp_servers = vec![spec(Some("vault"), "npx")];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1, "an extra server alone is a valid setup");
+        assert_eq!(servers[0].name, "vault");
+    }
+
+    #[test]
+    fn extra_servers_never_inherit_relay_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("BUZZ_AUTH_TAG", "tag-should-not-leak");
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Fizz");
+
+        let mut config = test_config();
+        let mut s = spec(Some("vault"), "npx");
+        s.env.insert("VAULT_TOKEN".into(), "own-secret".into());
+        config.mcp_servers = vec![s];
+        let servers = build_mcp_servers(&config);
+
+        std::env::remove_var("BUZZ_AUTH_TAG");
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        let primary = &servers[0];
+        assert!(
+            primary.env.iter().any(|e| e.name == "BUZZ_PRIVATE_KEY"),
+            "regression guard: the primary server still gets its credentials"
+        );
+
+        let extra = &servers[1];
+        let names: Vec<&str> = extra.env.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["VAULT_TOKEN"],
+            "an extra server sees ONLY its declared env — leaking BUZZ_PRIVATE_KEY \
+             would let it post to the relay as the agent"
+        );
+    }
+
+    #[test]
+    fn extra_server_args_are_passed_through() {
+        let mut config = test_config();
+        let mut s = spec(Some("vault"), "npx");
+        s.args = vec!["-y".into(), "obsidian-mcp".into()];
+        config.mcp_servers = vec![s];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers[1].args, vec!["-y", "obsidian-mcp"]);
+    }
+
+    #[test]
+    fn no_extra_servers_is_byte_identical_to_the_old_behaviour() {
+        // Regression 0: the field defaults to empty, and an empty list must
+        // change nothing about the single-server path.
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[0].command, "test-mcp-server");
+        assert!(servers[0].args.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -5272,6 +5392,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
