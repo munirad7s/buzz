@@ -14,6 +14,11 @@
 #       -> exit 0 = freigegeben, 10 = abgelehnt, 11 = Timeout
 #   gate.sh run --action A --reason R --payload P [--timeout 24h] -- cmd args...
 #       -> führt cmd NUR bei Freigabe aus (der strukturell sichere Weg)
+#
+#   --payload-file F / --reason-file F laden den Text aus einer Datei statt aus
+#   argv. Pflicht für alles, was Umlaute/Emoji/Zeilenumbrüche enthält oder von
+#   einem fremden Prozess kommt: die MSYS-Argumentkonvertierung zerlegt lange
+#   UTF-8-Argumente an der Prozessgrenze (gemessen, s. tg_post unten).
 #   gate.sh selftest        -> Klassifikator gegen Fixtures (Detektor-Rot-Beweis)
 #   gate.sh audit [--verify]-> Audit-Kette zeigen / Hash-Kette prüfen
 #
@@ -150,6 +155,11 @@ do_request() {
       --payload) payload="$2"; shift 2;;
       --timeout) timeout="$2"; shift 2;;
       --class)   cls="$2"; shift 2;;
+      # Datei-Varianten: UTF-8 überlebt argv an der Prozessgrenze nicht.
+      --reason-file)  [ -f "$2" ] || die "reason-file nicht lesbar: $2"
+                      reason=$(cat "$2"); shift 2;;
+      --payload-file) [ -f "$2" ] || die "payload-file nicht lesbar: $2"
+                      payload=$(cat "$2"); shift 2;;
       *) die "unbekannte Option: $1";;
     esac
   done
