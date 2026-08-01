@@ -179,3 +179,51 @@ Ein langer, mehrzeiliger UTF-8-Body als `curl -d "$(...)"` kommt bei Telegram al
 ### Grenze, die nicht umgangen wird
 
 `buzz agents draft-update --system-prompt` ändert eine Persona **nicht** headless — es öffnet ein vorbefülltes Formular in Munirs Desktop. Persona-Änderungen sind plattformseitig owner-reviewed. Deshalb liegt die Agenten-Doktrin in `~/.buzz/AGENTS.md` (lesen alle fünf, headless erreichbar) statt in fünf System-Prompts.
+
+## Ops-Lagebild auf Zuruf (buzz#7 — `.empire/tools/lagebild.sh`)
+
+**Entschieden: ein Script als einzige Erhebungsquelle** statt Agenten-Improvisation aus Einzelbefehlen. Begründung: „Lage?" beantwortet sich heute aus vier getrennten Systemen; ein Agent, der das jedes Mal frei zusammenbaut, produziert bei jeder Störung eine andere (und im Zweifel geschönte) Antwort. Das Script friert die Erhebung ein — Agenten formatieren nur noch.
+
+| Block | Quelle (nur lesend) |
+|---|---|
+| Backlog | `gh issue list -R <repo>` je Repo aus `adas-empire/priorities.json` + `munirad7s/buzz` — ready je Priorität, in-progress, blocked-munir, Top-3 P1-money, je-Repo-Aufschlüsselung |
+| n8n | `…/api/v1/executions` — Fehler im Zeitfenster mit aufgelösten Workflow-Namen, Gesamt-Executions als Nenner |
+| Server | `ssh hetzner`: uptime, `df /`, Container (laufend/exited/unhealthy), Uptime-Kuma-Monitore aus `kuma.db` im `mode=ro` |
+| Zahlungen | Mollie REST: Subscriptions nach Status, letzte Payment-Status, 30-Tage-Aggregat. Beträge nur mit `--amounts` (privater Kanal) |
+
+Ausgabe `--format md` (Kanal) oder `--format json` (Morgenbrief #11, Cockpit #17). Laufzeit ~40 s. Stripe fehlt bewusst: kein headless-fähiger Key vorhanden, der MCP ist OAuth/interaktiv — als Lücke benannt statt als „0 €" gemeldet (Folge-Ticket).
+
+### Keine stillen Nullen — der Detektor kann rot werden (6 Proben gemessen)
+
+| Probe | Ergebnis |
+|---|---|
+| falscher Mollie-Key | Block `FEHLER — HTTP 400`, Exit 2 |
+| falscher n8n-Key | Block `FEHLER — HTTP 401`, Exit 2 |
+| SSH-Host unauflösbar | Block `FEHLER — ssh …`, Exit 2 |
+| Kuma-Container falsch (`LAGEBILD_KUMA_CONTAINER`) | `Kuma: NICHT LESBAR — Status unbekannt`, NICHT „0 rot" |
+| Repo unlesbar (`LAGEBILD_REPOS`) | Repo namentlich als „nicht lesbar", fehlt in den Summen statt als 0 zu zählen |
+| keine Repo-Quelle | Block `FEHLER`, Exit 2 |
+
+Exit-Codes beantworten nur die **Erhebung**, nie die Lage: `0` vollständig · `1` unvollständig (Teil-Quelle nicht lesbar) · `2` Block tot · `3` keine Ausgabe. **Exit 0 heißt nicht „alles grün".**
+
+### Gemessene Fallen, die im Script schon abgeräumt sind
+
+- `gh search issues` schneidet bei erreichtem `-L`-Limit **still** ab → eine Abfrage je Repo; erreicht ein Repo das Limit, meldet der Block Truncation, statt eine zu kleine Zahl zu verkaufen.
+- HTTP 200 beweist nichts → jede HTTP-Quelle wird zusätzlich auf verwertbaren Payload geprüft (`_embedded`, `.data` als Array).
+- SSH kann **teilweise** durchlaufen → der Remote-Block endet mit einer Sentinel-Zeile; fehlt sie, ist der Block FEHLER, auch wenn schon Zahlen angekommen sind.
+- n8n prunt Executions → „0 Fehler" ist erst grün, wenn im selben Fenster überhaupt Executions liefen; sonst WARN „Datenlage prüfen".
+- jq schreibt unter Windows CRLF → jede jq-Pipe, deren Ergebnis in ein Kommando fließt, läuft durch `tr -d '\r'`; `--slurpfile` bekommt echte Dateien, keine Prozess-Substitution (`/proc/<pid>/fd` verschwindet unter MSYS).
+
+### Beweisstand (2026-08-01)
+
+| Schritt | Beweis |
+|---|---|
+| 2 Vollläufe | identische Struktur, bewegte Live-Werte zwischen den Läufen (Container-Zahl, Disk-%, in-progress) — gemessen, nicht gecacht |
+| Stichprobe Backlog | Script-Zahl je Repo == `gh issue list -R <repo> --label ready` für 2 Repos (exakt gleich); P1-money-Menge identisch mit unabhängiger `gh search`-Abfrage |
+| Stichprobe n8n | gemeldete Fehler-Execution-ID direkt über `/executions/<id>` bestätigt (`status: error`, gleicher Workflow, gleicher Zeitstempel) |
+| Stichprobe Server | uptime/Disk/Container/Kuma-Monitorzahl unabhängig per `ssh` gegengeprüft, identisch |
+| Stichprobe Zahlungen | Subscription-Status-Verteilung + letzte 3 Payment-Status direkt gegen die Mollie-API gegengeprüft, identisch |
+| Kanal-Zustellung | Lagebild headless durch `telegram-mcp` in Munirs Kanal — Handshake, 3 Tools, `delivered: true` mit `message_id` |
+| Kanal-Rot-Probe | mit kaputtem Bot-Token liefert derselbe Pfad `isError: true` statt einer stillen Erfolgsmeldung |
+
+**Offene Lücke (ehrlich benannt, nicht behoben):** Der im Ticket geforderte Beweis „@dispatcher Lage?" **im Buzz-Kanal** steht aus — beim Bau lief kein Relay (`localhost:3000` tot) und es existiert keine Dispatcher-Persona (das ist buzz#3, weiter offen). Der E2E-Beweis wurde deshalb über den Kanal geführt, der heute wirklich läuft (Telegram via `telegram-mcp`). Sobald #3 steht, ist der Buzz-Kanal-Lauf ein Einzeiler: Trigger-Wörter und Aufruf stehen bereits in `~/.buzz/AGENTS.md`.
