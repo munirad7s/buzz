@@ -219,7 +219,7 @@ fn describe_error_data(data: &serde_json::Value) -> Option<String> {
 /// ChatGPT quota as `{"message":"Internal error","data":{"message":"You've
 /// hit your usage limit…","codexErrorInfo":"usageLimitExceeded"}}`. Without
 /// this the log said `-32603: Internal error` and nothing else.
-fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
+pub(crate) fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let message = match error.get("message").and_then(|m| m.as_str()) {
         Some(m) => match error.get("data").and_then(describe_error_data) {
