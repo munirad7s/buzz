@@ -7,3 +7,4 @@
 2026-08-01 14:17 | 1 Ticket | #11 Vault-Protokoll (Nest-Doktrin + vault-log.sh, E2E claude+Fizz) | Blocker: keine
 2026-08-01 14:35 | 1 Ticket | #2 Eigener Buzz-Relay live (buzz.adas.casa, Traefik/LE, Scheduler-Beweis 4x@60s, Backup-Block 5e, Kuma-Monitor) | Blocker: keine
 2026-08-01 14:55 | 1 Ticket | #1 Fork-Baseline Windows (5 Sidecars + NSIS Buzz_0.5.3_x64-setup.exe, 693 Unit-Tests grün, .empire/BUILD.md, Sync-Ritual gefahren) | Befund: Hermit auf Windows tot, desktop-tauri-clippy upstream-rot | Blocker: keine
+2026-08-01 15:45 | 1 Ticket | #32 Gmail-Send gegated (gmail_send_draft + Sender hinter gate.sh, TOCTOU-Hash, E2E 10/10 + 4/4); Befund: gmail.compose darf senden -> buzz#4-Zusicherung widerlegt | Offen: Positiv-Beweis wartet auf Munirs erste echte Freigabe | Blocker: keine

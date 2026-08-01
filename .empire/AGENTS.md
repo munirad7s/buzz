@@ -29,7 +29,7 @@ Begründung (gemessen, nicht geraten):
 
 - Repo: `munirad7s/google-mcp` (`C:/Users/rescue/mcp-servers/google-mcp`), neues Modul `src/tools/gmail.ts`.
 - Tools: `gmail_profile`, `gmail_search`, `gmail_get_message`, `gmail_list_labels`, `gmail_create_label`, `gmail_label_message`, `gmail_create_draft` — **bewusst KEIN Send-Tool.**
-- Scopes: `gmail.readonly` + `gmail.modify` + `gmail.compose`. `gmail.send` wurde aus `src/auth.ts` ENTFERNT — der Token kann nicht senden, selbst wenn ein Tool es wollte.
+- Scopes: `gmail.readonly` + `gmail.modify` + `gmail.compose`. `gmail.send` wurde aus `src/auth.ts` ENTFERNT — der Token kann nicht senden, selbst wenn ein Tool es wollte. ⚠️ **Der zweite Halbsatz ist widerlegt** (gemessen 2026-08-01, buzz#32): `gmail.compose` darf bereits senden, ein `drafts.send` lief mit exakt dieser Scope-Liste durch. Gebremst hat immer nur das fehlende Tool. Details unten im Abschnitt „Gmail-Versand".
 - Postfach-Scope: `m.muniradas@gmail.com` (Führungs-Postfach). `antwort@adas.team` gehört n8n (`[ADA-70]`/`[ADA-237]`) — tabu.
 
 ### Token-Stabilität (der 7-Tage-Tod ist behoben)
@@ -434,3 +434,57 @@ Die REST-Bridge ist der bequemste Agenten-Weg, der Desktop nutzt WebSocket. Beid
 | Footprint | 4 Container ≈ 200 MB RSS gesamt (Limits 1 g/512 m/256 m/512 m) |
 
 **Nicht erledigt:** Der GUI-Beweis „Desktop-App verbindet sich" steht aus — der Windows-Build gehört buzz#1, und die installierte App mit der produktiven Community wird nicht angefasst. Der Transportweg der App (WSS + NIP-42) ist oben protokollnah bewiesen.
+
+## Gmail-Versand hinter dem Gate (buzz#32 — `gmail_send_draft`)
+
+**Entschieden: ein einziges Tool, das nur eine `draftId` nimmt und das Gate selbst aufruft.** Verworfen wurde ein Tool für frei komponierte Mails (dann wäre der freigegebene Text nicht mehr der gesendete) und ein Tool, das senden darf, „wenn der Agent vorher gefragt hat" (Vertrauen statt Struktur). Der Sende-Aufruf liegt in einem eigenen Prozess, den **das Gate startet** — der Prozess, der fragt, ist nicht der Prozess, der sendet.
+
+| Baustein | Ort |
+|---|---|
+| Tools `gmail_send_draft` / `gmail_send_status` | `munirad7s/google-mcp`, `src/tools/gmail-send.ts` |
+| Sender (einzige Stelle mit `drafts.send`) | `src/send-draft.ts` — **kein Tool**, wird nur von `gate.sh run -- …` gestartet |
+| Gemeinsame Guardrails | `src/gmail-send-core.ts` |
+| Gate | `.empire/gate.sh` (buzz#9), Pfad überschreibbar via `BUZZ_GATE_SH` |
+| Status/Audit je Anfrage | `~/.buzz/gmail-send/<sendId>.jsonl` (+ `.log`) — ausserhalb des öffentlichen Repos |
+
+### Der Befund, der die alte Sicherheitsannahme kippt
+
+Der Scope `gmail.compose` **darf senden** („Manage drafts and send emails"). Gemessen: ein `drafts.send` lief mit der Scope-Liste OHNE `gmail.send` erfolgreich durch, die Mail kam an. Die in buzz#4 dokumentierte Zusicherung „der Token kann nicht senden, selbst wenn ein Tool es wollte" war also **nie wahr** — gebremst hat allein das fehlende Tool.
+
+Konsequenz über Gmail hinaus: **Ein OAuth-Scope ist kein Guardrail, solange man ihn nicht gemessen hat.** Der belastbare Guardrail bleibt das Tool-Set (dasselbe Muster wie das fehlende Update-Tool bei Espo). `gmail.send` wurde deshalb bewusst **nicht** ergänzt — es hätte kein zusätzliches Recht gebracht, nur einen überflüssigen Re-Consent erzwungen; der bereits gestartete Consent-Vorgang wurde wieder abgebrochen.
+
+### Warum asynchron, und was `pending` bedeutet
+
+`gmail_send_draft` kommt sofort mit einer `sendId` zurück, während das Gate detached weiterläuft (Default 6 h). Grund: ein MCP-Client-Timeout darf nicht darüber entscheiden, wie lange Munir antworten darf. Ein synchron blockierendes Gate wäre in der Praxis immer in den Timeout gelaufen — und ein Werkzeug, das nie funktioniert, wird nicht benutzt, womit der Money-Link des Tickets stirbt.
+
+Deshalb gilt hart: **`status: sent` ist der einzige Beleg für „raus". `pending` heisst „nichts passiert".** Ein fehlendes Terminal-Event wird nie als Erfolg gelesen (`deriveStatus` ist fail-closed).
+
+### Guardrails (in dieser Reihenfolge)
+
+1. **Vor der Anfrage** — kein Gate wird belästigt, wenn schon der Entwurf verboten ist: `antwort@adas.team` (gehört n8n), die eigene Adresse (Schleifen-Schutz), Bcc, mehr als 3 Empfänger, kein Empfänger. Erweiterbar über `GMAIL_SEND_BLOCKLIST`.
+2. **Kein Gate-Script → kein Versand.** Ein gepinntes `BUZZ_GATE_SH` ist autoritativ: existiert es nicht, verweigert das Tool, statt still auf ein anderes Gate zurückzufallen.
+3. **Nach der Freigabe (TOCTOU)** — `drafts.send` sendet immer den AKTUELLEN Entwurf. Der Sender re-fetcht ihn und vergleicht den SHA-256 der RFC822-Bytes mit dem aus der Anfrage; ein danach geänderter Entwurf wird verweigert (exit 3). Ohne diese Prüfung wäre jede Freigabe wertlos: harmlosen Entwurf zeigen, freigeben lassen, Inhalt tauschen.
+4. **Im Sender nochmal** die Empfänger-Prüfung (exit 4) — fängt eine Blockliste, die zwischen Anfrage und Versand gewachsen ist.
+
+### Fallen (gemessen, nicht geraten)
+
+- **`StdioClientTransport` vererbt die Umgebung NICHT.** Ohne explizites `env: {...process.env}` startet der MCP-Server mit einer Default-Umgebung — im Test lief dadurch stillschweigend ein **anderes** `gate.sh` (das ohne `--payload-file`), und der Fehler sah aus wie ein Gate-Bug. Wer einen MCP-Server im Test konfiguriert, gibt `env` mit.
+- **UTF-8 stirbt in argv an der Prozessgrenze** (MSYS, s. buzz#9). Deshalb bekam `gate.sh` `--payload-file` und `--reason-file`; Node schreibt Payload und Grund als Dateien und übergibt nur ASCII-Pfade. Der Runner ist ein generiertes Shell-Script — kein `bash -c` mit verschachteltem Quoting.
+- **Telegram deckelt bei 4096 Zeichen.** Der Volltext wird bei 2800 Zeichen sichtbar gekürzt; der Fingerprint in der Anfrage bindet trotzdem die vollständige Nachricht.
+- Der Payload-Hash in der Audit-Kette ist der des **Gate-Textes**; der Draft-Fingerprint steht zusätzlich in `~/.buzz/gmail-send/<sendId>.jsonl`. Mail-Inhalte liegen in keiner Datei im Repo.
+
+### Beweisstand (2026-08-01, headless über stdio, echtes Postfach + echtes Gate)
+
+`node test/gmail-send-e2e.mjs` → **10/10** · `node test/sender-refusal.mjs` → **4/4**.
+
+| Schritt | Beweis |
+|---|---|
+| Tool-Surface | genau 2 Send-Tools; `gmail_send_draft` hat weder `to`/`cc`/`bcc` noch `body`/`subject`/`raw` — Freitext-Versand existiert nicht |
+| Empfänger-Guardrails | `antwort@adas.team`, eigene Adresse, 4 Empfänger → je `isError`, und die **Audit-Kette wächst nicht** (das Gate wurde gar nicht erst gefragt) |
+| Kein Gate → kein Versand | gepinntes, nicht existierendes `BUZZ_GATE_SH` → Verweigerung statt Fallback |
+| **Negativ live** | `G-A6923B` an Munir zugestellt (TG msg 99), 45 s ohne Antwort → `status: timeout`, `in:sent` unverändert (0 → 0), Audit `requested` + `timeout` |
+| **TOCTOU** | falscher Hash → exit 3 „changed after approval", `refused` im Status-Log, nichts gesendet |
+| **Detektor ist spezifisch** | derselbe Sender mit KORREKTEM Hash passiert die Hash-Prüfung und wird erst von der Empfänger-Regel gestoppt (exit 4) — die Verweigerung ist nicht pauschal |
+| Audit-Kette | nach allen Läufen `gate.sh audit --verify` intakt |
+
+**Offen und ehrlich benannt:** Der Positiv-Beweis („Freigabe → Mail kommt an → `status: sent`") hängt an einer echten Antwort Munirs. Bemerkenswert dabei: **die Audit-Kette enthält bis heute keine einzige echte Freigabe** — der Positiv-Beweis aus buzz#9 war transport-gemockt, der Vorflug-Versuch eines Vorgänger-Agenten (`G-0182A6`) blieb unbeantwortet. Anfrage `G-E78AD0` (TG msg 101) läuft; Kommando: `node test/positive-proof.mjs`, Status via `--status <sendId>`. Der Pfad dahinter ist bis auf diesen Schritt bewiesen: derselbe Sender hat mit korrektem Hash nachweislich eine echte Mail zugestellt — nur aus einem Direktaufruf beim Aufdecken des Scope-Befunds, nicht aus einer Freigabe.
