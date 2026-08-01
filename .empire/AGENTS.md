@@ -127,6 +127,32 @@ Espo = Pipeline-Wahrheit (Status, Score, `cNextAction`, Touchpoint-Historie). Va
 | Cleanup | Touchpoint + Note + Test-Lead gelöscht: Agent-GET 404, `deleted: true`, Suche 0 Treffer |
 | Koexistenz n8n | Nach der Umstellung gemessen: n8n-User `claude-mcp-admin` unverändert (`delete: all`), liest weiter 284 Leads; `[ADA-22] lead-enrich` zuletzt grün (Execution 140686). Der Nachtlauf-Beweis für die kommende Nacht steht noch aus. |
 
+### ACL-Drift-Wächter (buzz#28 — die Minimal-Rechte bleiben nur minimal, wenn jemand misst)
+
+Rechte sind kein Zustand, den man einmal setzt: Espo-Upgrades und neue Custom-Entities bringen Scopes mit, die keine Rolle erwähnt — und die fallen auf **Vollzugriff** zurück. Der „minimale" User wird still zum Admin auf allem Neuen, ohne dass irgendetwas fehlschlägt. Der Wächter misst täglich die echte ACL-Tabelle gegen einen Snapshot.
+
+- Ort: `munirad7s/espo-mcp` — `acl/<user>.json` (Snapshot, **`why` je Scope**), `tools/acl-core.mjs` (reine Diff-Logik), `tools/acl-guard.mjs` (CLI + `--capture` + `--emit-n8n`), `tools/acl-guard-selftest.mjs`, `tools/deploy-n8n-guard.mjs`.
+- Läuft nie mit Admin-Rechten: jeder User wird mit dem **eigenen** Key über `GET /App/user` gemessen.
+- Täglicher Lauf: n8n `[BUZZ-28] espo-acl-drift` (`BcOks63T4gUmEeqP`), Cron `20 5 * * *` **UTC** = 07:20 CEST, bewusst vor dem Morgenbrief. Alarm nur bei Drift → Telegram (`telegram-adas-agency`). Gewählt statt Kuma (keine neuen Server-Monitore in dieser Welle) und statt Windows-Task (stirbt mit dem Laptop); Doktrin 3 — wiederkehrende Mechanik gehört nach n8n.
+- **Kein Doppelbau:** der n8n-Code-Node wird aus dem Repo **generiert** (`--emit-n8n` inlined `acl-core.mjs` wörtlich + die Snapshots). Nach jeder bewussten Snapshot-Änderung `npm run acl:deploy`.
+- Bewertung: `expanded` (User hat dazugewonnen) und `narrowed` (Aufrufer brechen) sind rot, `new-scope` ohne Zugriff ist nur eine Pflege-Notiz. Alarmtext nennt Scope + `alt -> neu`, nicht nur „Drift".
+
+**Gemessene Fallen (2026-08-01, nicht geraten):**
+
+- `GET /App/user` **lässt vollständig verweigerte Scopes weg** — `buzz-agent`: 15 Keys, null `false`-Einträge. Jeder neue Key in der Tabelle bedeutet also Zugewinn. Das macht die Erkennung scharf und war vorher andersherum dokumentiert.
+- Der CRM-Schreibpfad hat **drei** API-User, nicht zwei: `buzz-agent` (Rolle „buzz-agent (read + touchpoint)"), `n8n-agent` (Rolle `agent-api` — der Key in der n8n-Credential `EspoCRM n8n-agent (ADA-44)`) und `claude-mcp-admin` (Rolle `claude-mcp-admin`, 61 Scope-Einträge inkl. `Role`/`User`/`AuthToken`/`AppSecret` → faktisch adminäquivalent). **`claude-mcp-admin` ist der `createdById` der nächtlich angelegten Leads**, nicht `n8n-agent` — wer nur die n8n-Credential prüft, misst den falschen User.
+- Ein Espo-Rollen-Update ist ein `PUT /Role/<id>` mit dem **kompletten** `data`-Objekt; Teilmengen löschen den Rest. Rollback = ursprüngliches `data` zurückschreiben.
+
+**Beweis (Detektor rot und wieder grün, zweimal — lokal und über den Scheduler):**
+
+| Schritt | Beweis |
+|---|---|
+| Lokal grün | `acl-guard.mjs` 0 Abweichungen für alle drei User, Exit 0 |
+| Lokal rot | Self-Test schaltet `Document` in der echten Rolle frei → Exit 1, Text nennt `Document — scope is new … live: read:all`; Revert → wieder grün (4/4) |
+| Scheduler rot | n8n-Execution `141485` mit gewidmeter Rolle: `alarm: true`, Telegram-Node gelaufen (`ok: true`) |
+| Scheduler grün | Execution `141487` nach Revert und `141501` mit allen drei Usern: `alarm: false`, kein Telegram |
+| Referenzstand geschützt | `test/e2e.mjs` 14/14 vor und nach der Arbeit |
+
 ## Approval-Gate (buzz#9 — kein Outbound ohne Freigabe)
 
 Doktrin: `.empire/POLICY.md` (drei Klassen FREI · GATED · VERBOTEN). Werkzeug: `.empire/gate.sh`. Agenten-Kurzfassung liegt in `~/.buzz/AGENTS.md` und erreicht damit alle fünf Nest-Agenten (Bumble, claude, codex, Fizz, Honey).
