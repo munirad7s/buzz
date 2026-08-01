@@ -270,6 +270,52 @@ block_n8n() {
     block_error n8n "Nenner nicht ermittelbar (Gesamt-Executions HTTP $code)"; return
   fi
 
+  # ---- adas-empire#85: Reicht die Historie überhaupt so weit zurück? --------
+  # n8n prunt Executions nach ANZAHL, nicht nach Alter. Am 2026-08-01 gemessen:
+  # 10 175 Zeilen = 3,4 Tage. Eine Aussage wie "0 Fehler in 168 h" ist dann eine
+  # Aussage über ein Fenster, das gar nicht existiert — und jeder Wochen-
+  # Workflow sieht aus, als wäre er nie gelaufen. Zwei prune-feste Zahlen
+  # kommen deshalb direkt aus der DB: die Retention-Grenze und der letzte
+  # Produktionslauf je aktivem Workflow (workflow_statistics überlebt Pruning).
+  #
+  # Keine Zugangsdaten im Repo: psql läuft IM Postgres-Container und benutzt
+  # dessen eigenes $POSTGRES_USER. Der Containername ist per Env überschreibbar,
+  # damit der Pfad rot-probierbar ist, ohne den Server anzufassen.
+  local pgc="${LAGEBILD_N8N_PG_CONTAINER:-postgresql-m12c6fi640vm8lgeuxrl4evo}"
+  local stale_days="${LAGEBILD_N8N_STALE_DAYS:-8}"
+  : > "$TMP/n8n_retention.raw"
+  # SQL kommt über stdin an psql (-f -) statt durch drei Quoting-Ebenen.
+  { printf 'PGC=%s\nSTALE=%s\n' "$pgc" "$stale_days"
+    cat <<'REMOTE'
+set -u
+sql() { printf '%s\n' "$1" | docker exec -i "$PGC" sh -c 'psql -U "$POSTGRES_USER" -d n8n -At -f -' 2>/dev/null; }
+if sql "SELECT 'n8n_oldest=' || COALESCE(to_char(min(\"startedAt\") AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') FROM execution_entity;" | grep -q '^n8n_oldest=.'
+then
+  sql "SELECT 'n8n_oldest=' || to_char(min(\"startedAt\") AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') || E'\n' || 'n8n_rows=' || count(*) FROM execution_entity;"
+  # NUR zeitgesteuerte Workflows. Ein webhook-getriebener Flow ohne Ereignis
+  # ist NICHT ausgefallen — er hatte nichts zu tun. Gemessen: ohne diese
+  # Einschraenkung meldete der Waechter 31 Namen, davon fast alle Mollie-/
+  # Doi-/Call-Flows ohne Traffic. Rauschen, das niemand liest, ist kein Waechter.
+  sql "SELECT 'n8n_stale=' || w.name FROM workflow_entity w JOIN workflow_statistics s ON s.\"workflowId\"=w.id WHERE w.active AND (w.nodes::text LIKE '%scheduleTrigger%' OR w.nodes::text LIKE '%cronTrigger%') AND s.name IN ('production_success','production_error') GROUP BY w.name HAVING max(s.\"latestEvent\") < now() - make_interval(days => ${STALE}::int);"
+  echo "n8n_retention_ok=1"
+else
+  echo "n8n_retention_ok=0"
+fi
+echo "RETENTION_DONE=1"
+REMOTE
+  } | timeout 40 ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+      "$SSH_HOST" 'bash -s' > "$TMP/n8n_retention.raw" 2>/dev/null || true
+
+  local ret_ok oldest rows
+  if grep -q '^RETENTION_DONE=1$' "$TMP/n8n_retention.raw" 2>/dev/null; then
+    ret_ok="$(grep -m1 '^n8n_retention_ok=' "$TMP/n8n_retention.raw" | cut -d= -f2 | tr -d "$CR")"
+  else
+    ret_ok=0
+  fi
+  oldest="$(grep -m1 '^n8n_oldest=' "$TMP/n8n_retention.raw" | tail -1 | cut -d= -f2 | tr -d "$CR")"
+  rows="$(grep -m1 '^n8n_rows=' "$TMP/n8n_retention.raw" | cut -d= -f2 | tr -d "$CR")"
+  grep '^n8n_stale=' "$TMP/n8n_retention.raw" | sed 's/^n8n_stale=//' | tr -d "$CR" > "$TMP/n8n_stale.txt" || true
+
   # Workflow-IDs -> Namen (nur die tatsächlich betroffenen, ein Call je ID)
   : > "$TMP/wfnames.tsv"
   local wid wname wcode
@@ -291,23 +337,44 @@ block_n8n() {
     --argjson window "$WINDOW_HOURS" \
     --slurpfile err "$TMP/n8n_err.json" \
     --slurpfile all "$TMP/n8n_all.json" \
-    --rawfile names "$TMP/wfnames.tsv" '
+    --rawfile names "$TMP/wfnames.tsv" \
+    --arg ret_ok "${ret_ok:-0}" --arg oldest "${oldest:-}" --arg rows "${rows:-}" \
+    --arg stale_days "$stale_days" --rawfile stale "$TMP/n8n_stale.txt" '
     ($names | split("\n") | map(select(length>0) | split("\t") | {key:.[0], value:.[1]}) | from_entries) as $wf
     | ($err[0].data | map(select(.startedAt >= $cutoff))) as $e
     | ($all[0].data | map(select(.startedAt >= $cutoff))) as $a
+    | ($stale | split("\n") | map(select(length>0))) as $st
+    | ($ret_ok == "1" and ($oldest|length) > 0) as $ret_known
+    # Reicht die Historie so weit zurueck wie das angeforderte Fenster?
+    | ($ret_known and $oldest > $cutoff) as $truncated
     | {
-        state: (if ($e|length) > 0 then "warn" elif ($a|length) == 0 then "warn" else "ok" end),
+        state: (if ($e|length) > 0 then "warn"
+                elif ($a|length) == 0 then "warn"
+                elif $truncated then "warn"
+                elif ($st|length) > 0 then "warn"
+                elif ($ret_known|not) then "warn"
+                else "ok" end),
         window_hours: $window,
         errors_total: ($e|length),
         executions_in_window: ($a|length),
         executions_window_is_floor: (($all[0].data|length) >= 250),
+        retention_known: $ret_known,
+        retention_oldest: (if $ret_known then $oldest else null end),
+        retention_rows: (if $ret_known then ($rows|tonumber? // null) else null end),
+        retention_covers_window: (if $ret_known then ($truncated|not) else null end),
+        stale_days: ($stale_days|tonumber? // null),
+        stale_workflows: $st,
         by_workflow: ($e | group_by(.workflowId) | map({
             workflow: ($wf[.[0].workflowId] // .[0].workflowId),
             count: length,
             last_execution: (max_by(.startedAt) | .id),
             last_at: (max_by(.startedAt) | .startedAt)
           }) | sort_by(-.count)),
-        reason: (if ($a|length) == 0 then "keine einzige Execution im Fenster — Datenlage prüfen (Pruning oder n8n steht)" else null end)
+        reason: (if ($a|length) == 0 then "keine einzige Execution im Fenster — Datenlage prüfen (Pruning oder n8n steht)"
+                 elif $truncated then "LÜCKE: Fenster " + ($window|tostring) + " h angefordert, Historie reicht nur bis " + $oldest + " — die Fehlerzahl ist eine UNTERGRENZE, kein Befund"
+                 elif ($ret_known|not) then "LÜCKE: Retention-Grenze nicht lesbar — unklar, ob das Fenster überhaupt abgedeckt ist"
+                 elif ($st|length) > 0 then "letzter Produktionslauf älter als " + $stale_days + " d (prune-fest aus workflow_statistics): " + ($st|join(", ")) + " — bei Wochen-Takt ein Ausfall, bei Monats-Takt normal"
+                 else null end)
       }' > "$TMP/n8n.json" 2>/dev/null \
     || block_error n8n "Aggregation der n8n-Antwort fehlgeschlagen"
 }
@@ -650,6 +717,12 @@ else
      else "**n8n** " + (.n8n.state|icon) + " — " + (.n8n.errors_total|tostring) + " Fehler-Executions in "
           + (.n8n.window_hours|tostring) + " h · " + (.n8n.executions_in_window|tostring)
           + (if .n8n.executions_window_is_floor then "+" else "" end) + " Executions gesamt"
+          + "\n  Historie: " + (if .n8n.retention_known
+                                then (.n8n.retention_rows|tostring) + " Executions ab " + .n8n.retention_oldest
+                                     + (if .n8n.retention_covers_window then " (deckt das Fenster)" else " — DECKT DAS FENSTER NICHT" end)
+                                else "Retention-Grenze NICHT LESBAR" end)
+          + (if ((.n8n.stale_workflows // [])|length) > 0
+             then "\n  Letzter Lauf > " + (.n8n.stale_days|tostring) + " d her: " + (.n8n.stale_workflows|join(", ")) else "" end)
           + (if .n8n.reason then "\n  ! " + .n8n.reason else "" end)
           + (if (.n8n.by_workflow|length) > 0 then
                "\n" + (.n8n.by_workflow | map("  - " + .workflow + " — " + (.count|tostring) + "x, zuletzt " + (.last_at[11:16]) + " UTC (exec " + .last_execution + ")") | join("\n"))

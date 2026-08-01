@@ -742,6 +742,19 @@ befunde() {
            + " Läufe schiefgegangen"
            + (if ((.n8n.by_workflow // [])|length) > 0
               then ", am häufigsten " + (.n8n.by_workflow[0].workflow) else "" end) + "."
+         else empty end),
+        # adas-empire#85: Eine Fehlerzahl aus einem Fenster, das die Historie
+        # gar nicht abdeckt, ist eine Untergrenze — und sie sieht aus wie eine
+        # Entwarnung. Das muss im Brief stehen, nicht nur im Lagebild-JSON.
+        (if (.n8n.retention_known? == false) then
+           "Von der Automatisierung ist unklar, wie weit ihr Gedächtnis zurückreicht — die Fehlerzahl oben ist deshalb nicht belastbar."
+         elif (.n8n.retention_covers_window? == false) then
+           "Die Automatisierung erinnert sich nur bis " + (.n8n.retention_oldest // "?")
+           + "; alles davor ist gelöscht. Die Fehlerzahl oben ist eine Untergrenze, keine Entwarnung."
+         else empty end),
+        (if ((.n8n.stale_workflows? // [])|length) > 0 then
+           "Seit über " + ((.n8n.stale_days // "?")|tostring) + " Tagen nicht mehr gelaufen: "
+           + ((.n8n.stale_workflows)|join(", ")) + " (bei Wochen-Takt ein Ausfall, bei Monats-Takt normal)."
          else empty end)
       ] | .[]' "$TMP/lage.json" 2>/dev/null | tr -d "$CR")"
     [ -n "$z" ] && KAPUTT="$z"
