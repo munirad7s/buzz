@@ -209,6 +209,43 @@ Konsequenz: **ein Workflow mit `request_approval` schlägt fehl, statt zu warten
 
 Übernahmepfad: sobald WF-08 landet (oder wir es upstream beisteuern), wird `gate.sh` zum Adapter — Anfrage/Verdikt bleiben gleich, nur der Transport wechselt auf kind 46010. Folge-Ticket buzz#33.
 
+### WF-08 ist NICHT unsere Baustelle — und der native Pfad taugt heute nicht als Gate (gemessen 2026-08-01, buzz#33)
+
+Zwei Prämissen von buzz#33 sind gemessen widerlegt. Der Auftrag lautete „WF-08 bauen und upstream beisteuern"; beides ist falsch adressiert.
+
+**1. Upstream baut WF-08 längst — zweimal.** Vor jedem Zeilenschreiben gehört die Duplikat-Suche (`CONTRIBUTING.md`: „search open PRs and issues for duplicates … Duplicates may be closed with a pointer here"):
+
+| block/buzz | Art | Stand |
+|---|---|---|
+| **#2377** `feat(workflow): persist and resume approval gates (WF-08)` | PR, 5 Dateien, +447/−45 | offen seit 22.07. |
+| **#3327** `feat(workflow): implement WF-08 approval gates` | PR, 7 Dateien, +1347/−76 | offen seit 28.07. |
+| #2376 | Issue | Design + Implementierung WF-08 |
+| #3525 | Issue | „finalize_run drops the token instead of creating WaitingApproval" — **wortgleich unser eigener Befund**, schon vor uns gemeldet |
+| #2878 | Issue | `from:`-Syntax wird beim Approven abgelehnt, die funktionierende Syntax nimmt jeden Key |
+
+Ein dritter PR auf derselben (großen) Fläche wäre reines Duplikat. **Regel daraus: Duplikat-Suche im Upstream-Tracker ist Teil des Vorflug-Checks jedes Upstream-Tickets, nicht Kür.** Sie hat am 01.08. zweimal getroffen (hier und bei buzz#82).
+
+**2. Der native Pfad hätte unsere Gate-Doktrin gebrochen, nicht erfüllt.** `check_approver_spec` (`crates/buzz-relay/src/handlers/command_executor.rs:1004`) kennt exakt drei Fälle:
+
+| `approver_spec` | Wirkung |
+|---|---|
+| `""` oder `"any"` | **jeder authentifizierte User darf freigeben** |
+| 64-Zeichen-Hex-Pubkey | nur genau dieser Key |
+| alles andere (`@release-manager`, Rollen) | abgelehnt, fail-closed |
+
+Das Schema dokumentiert `from` aber als „User mention or role (e.g. `\"@release-manager\"`)" — also genau die Form, die der Relay **nie** akzeptiert. Wer WF-08 naiv verdrahtet, landet zwangsläufig bei `any`, und dann darf **jeder Agent in der Community seine eigene Anfrage freigeben**. Das ist das Gegenteil des Nicht-Ziels „nur Munir gibt frei, keine Agent-zu-Agent-Freigabe".
+
+PR #2377 löst genau das bereits richtig (`resolve_approver_spec`: `any` → `any`, Hex/`npub1…`/`@`-Präfix → exakter Hex-Key, Klarnamen-Mention → Fehler statt einer Approval, die niemand granten kann). Diese Fallunterscheidung stand in unserem Ticket nicht drin — wir hätten sie beim Bauen selbst finden müssen, vermutlich spät.
+
+**Schaltbedingung für `gate.sh` (bis dahin bleibt es der Sidecar).** Nicht „WF-08 ist gemerged", sondern alle vier Punkte gleichzeitig:
+
+1. WF-08 in `upstream/main` gemerged (heute: nein).
+2. `approver_spec` trägt Munirs **64-Zeichen-Hex-Pubkey**, nicht `any` — nachgelesen am persistierten Approval-Record, nicht an der Workflow-YAML.
+3. **Rot-Probe:** ein zweiter Key granted dieselbe Approval → abgelehnt. Ohne diesen Beweis ist der Transport nicht gate-tauglich, egal was das Schema sagt.
+4. Timeout/Ablehnung führen weiterhin zu **gar nichts** (fail-closed), Run läuft nicht weiter.
+
+Erst danach wird `gate.sh` Adapter. Bis dahin gilt: `gate.sh` ist keine Übergangslösung, die auf WF-08 wartet, sondern der einzige Pfad, der die Doktrin heute nachweislich hält.
+
 ### Wie das Gate funktioniert
 
 Anfrage = strukturierte Nachricht (Klasse · Aktion · Grund · **echter Payload** · Gate-ID) in Munirs privaten TG-Chat über den Bestands-Bot aus buzz#5. Verdikt = seine Antwort, die die zufällige Gate-ID nennt. `gate.sh run -- <kommando>` führt das Kommando **nur** bei Freigabe aus; Ablehnung (10) und Timeout (11) führen zu gar nichts.
