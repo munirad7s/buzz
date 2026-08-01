@@ -1574,6 +1574,31 @@ Gemessen: `ritual.sh` gab `64` zurück (kein Brief erzeugt, nichts zugestellt), 
 
 **Regel:** In jedem `.cmd`/`.ps1`/`.sh`-Wrapper den Exit-Code der Nutzlast **unmittelbar** sichern (`set "RC=%ERRORLEVEL%"` bzw. `rc=$?`) und am Ende weiterreichen. Kein Kommando zwischen Nutzlast und Sicherung — auch kein Log-`echo`. Vorbild im Haus: `google-mcp/scripts/token-probe-task.cmd`. Und danach die Rot-Probe: der Wrapper muss mit einem garantiert scheiternden Aufruf einen Nicht-Null-Code liefern, sonst ist der Fix unbewiesen.
 
+### Ritual-Heartbeat (buzz#101 — der Leser für diese Exit-Codes)
+
+Ein echter Exit-Code nützt nichts, solange ihn niemand liest. Seit 2026-08-01 hängt hinter jedem Ritual ein Uptime-Kuma-Push-Monitor:
+
+| Ritual | Windows-Aufgabe | Kuma-Monitor | Token in `~/.secrets/master.env` | Intervall |
+|---|---|---|---|---|
+| Morgenbrief 08:45 | `Buzz-Ritual-Morgenbrief` | `ritual-morgenbrief` (id 64) | `KUMA_PUSH_RITUAL_MORGENBRIEF` | 93 600 s (26 h) |
+| Gate-Batch 20:45 | `Buzz-Ritual-Gate-Batch` | `ritual-gate-batch` (id 65) | `KUMA_PUSH_RITUAL_GATE_BATCH` | 93 600 s (26 h) |
+| Wochen-Review So 18:00 | `Buzz-Ritual-Wochen-Review` | `ritual-wochen-review` (id 66) | `KUMA_PUSH_RITUAL_WOCHEN_REVIEW` | 691 200 s (8 d) |
+
+- Push: `.empire/tools/ritual-push.sh <mode> <rc>`, aufgerufen von `ritual-task.cmd` **nach** `set "RC=%ERRORLEVEL%"`.
+- Abbildung: `rc` 0/1 → `status=up` · `rc` ≥ 2 → **expliziter** `status=down` (Erkennung sofort, nicht erst nach 26 h). Deshalb `maxretries: 0` an den Monitoren — mit Retries würde aus dem Down-Push erst PENDING.
+- **Rangfolge im Wrapper:** Ritual-Fehler schlägt Herzschlag-Fehler. Ist das Ritual grün, aber der Push scheitert (Token weg, Kuma tot), meldet die Aufgabe **4** — ein blinder Wächter darf nicht als grün durchgehen. Ein fehlender Token endet nie still mit `exit 0` (das Gegenbeispiel im Haus ist `/opt/agency/push-health.sh`).
+- Provisionierung: `agency-infra` `stacks/monitoring/provision/kuma-add-rituals.mjs` (idempotent, Benachrichtigungen zur Laufzeit — s. agency-infra#134).
+- **Rot-Probe-Rezept** (Set→Beweis→Revert als ein Block, ohne irgendetwas kaputtzumachen):
+  ```powershell
+  $env:RITUAL_VAULT_LOG = "C:\nonexistent\vault-log.sh"   # Vault-Transport scheitert -> ritual.sh rc=3
+  cmd /c ".empire\tools\ritual-task.cmd gate-batch"        # erwartet: Exit 3, Monitor Down, Alarm
+  $env:RITUAL_VAULT_LOG = ""
+  cmd /c ".empire\tools\ritual-task.cmd gate-batch"        # erwartet: Exit 0, Monitor Up, Recovery
+  ```
+  Für den Token-Pfad stattdessen `$env:RITUAL_SECRETS_FILE = "/nonexistent"` — erwartet: `HERZSCHLAG-LÜCKE` in `~/.buzz/ritual.log` und Aufgaben-Exit **4**.
+- **Falle:** `HTTP 200` beweist beim Kuma-Push nichts — ein falscher Token liefert `{"ok":false}`. `ritual-push.sh` prüft deshalb den Body, nicht nur den Code.
+- **Falle (agency-infra#148):** Ein Push-Monitor **ohne ersten Beat** alarmiert nie. Neue Ritual-Monitore brauchen sofort einen Bootstrap-Beat (`bash ritual-push.sh <mode> 0`), sonst sind sie bis zum ersten echten Lauf wirkungslos still.
+
 ### Aus der n8n-Execution-Historie darf man „ist nie gelaufen" NICHT schließen
 
 `GET /executions?workflowId=…` meldete für drei aktive Wochen-Workflows null Executions. Alle drei waren gelaufen. Grund: n8n prunt nach **Anzahl** (Default `EXECUTIONS_DATA_PRUNE_MAX_COUNT=10000`, im Container ist keine `EXECUTIONS_*`-Variable gesetzt), und bei ~2 900 Executions/Tag reicht die Historie nur **3,4 Tage** zurück — kürzer als eine Wochen-Periode.

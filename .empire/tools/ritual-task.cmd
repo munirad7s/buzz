@@ -33,12 +33,24 @@ set "HERE=%~dp0"
 "%GITBASH%" -lc "mkdir -p ~/.buzz; echo \"=== $(date -Is) ritual %~1 ===\" >> ~/.buzz/ritual.log; bash '%HERE:\=/%ritual.sh' %~1 --post --telegram --vault >> ~/.buzz/ritual.log 2>&1; rc=$?; echo \"exit=$rc\" >> ~/.buzz/ritual.log; exit $rc"
 set "RC=%ERRORLEVEL%"
 
+REM Herzschlag an Uptime Kuma (buzz#101) — MUSS nach dem Sichern von RC stehen,
+REM sonst ueberschreibt der Push den zu meldenden Exit-Code. Der Push bekommt RC
+REM uebergeben und bildet ihn ab; er ueberschreibt ihn nie: ein gescheitertes
+REM Ritual bleibt rot, auch wenn der Push gelingt. Umgekehrt darf ein
+REM gescheiterter Push nicht still bleiben — ein Monitor ohne Beat ist derselbe
+REM blinde Fleck, den dieses Ticket schliesst.
+"%GITBASH%" -lc "bash '%HERE:\=/%ritual-push.sh' %~1 %RC%"
+set "PUSHRC=%ERRORLEVEL%"
+
 REM ritual.sh: 0 = alle Quellen geliefert · 1 = Brief zugestellt, mit benannten
 REM Luecken · 2 = kein Brief · 3 = Transport gescheitert · 64 = Usage.
 REM 0 und 1 heissen beide "der Brief hat Munir erreicht" -> gruen. Alles ab 2
 REM heisst "er hat ihn NICHT erreicht" -> muss rot sein. Wuerde auch 1 rot
 REM melden, waere die Aufgabe an praktisch jedem Tag rot (Luecken sind der
 REM Normalfall) und niemand schaute mehr hin.
-if "%RC%"=="0" exit /b 0
-if "%RC%"=="1" exit /b 0
-exit /b %RC%
+REM Rangfolge: Ritual-Fehler schlaegt Herzschlag-Fehler. Ist das Ritual gruen,
+REM aber der Herzschlag kaputt, meldet die Aufgabe 4 — sonst wuesste niemand,
+REM dass der Waechter selbst blind ist.
+if not "%RC%"=="0" if not "%RC%"=="1" exit /b %RC%
+if not "%PUSHRC%"=="0" exit /b 4
+exit /b 0
