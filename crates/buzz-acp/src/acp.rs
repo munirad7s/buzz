@@ -2956,10 +2956,115 @@ mod tests {
         );
     }
 
+    /// Resolve the POSIX shell the fixture scripts run in.
+    ///
+    /// Spawning the bare name `"bash"` resolves through the **Windows** `PATH`,
+    /// where `C:\Windows\System32\bash.exe` — the WSL launcher — normally wins
+    /// over Git Bash even when the test itself was started from Git Bash. WSL
+    /// runs the script inside the distro and never hands it the parent's
+    /// anonymous pipe: every `read` in the fixture returns EOF immediately, the
+    /// script answers nothing, and the client reports `AgentExited`.
+    ///
+    /// Measured 2026-08-01 by printing `uname -sr` from inside a fixture:
+    /// `Linux 6.6.87.2-microsoft-standard-WSL2`, `pwd` = `/mnt/c/...`.
+    ///
+    /// Override with `BUZZ_TEST_BASH` when neither heuristic finds a usable
+    /// shell. On unix the bare name is correct and stays.
+    #[cfg(windows)]
+    fn test_shell() -> String {
+        if let Ok(explicit) = std::env::var("BUZZ_TEST_BASH") {
+            if !explicit.is_empty() {
+                return explicit;
+            }
+        }
+        // Git Bash exports EXEPATH (its install root) into every shell it starts.
+        if let Ok(exepath) = std::env::var("EXEPATH") {
+            let candidate = std::path::Path::new(&exepath).join("bin").join("bash.exe");
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            if std::path::Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
+        }
+        // Deliberately NOT falling back to "bash": that is the broken WSL path
+        // and would turn a missing-toolchain error into a silent hang-and-fail.
+        panic!(
+            "no Git Bash found for fixture scripts — set BUZZ_TEST_BASH to a \
+             POSIX shell that inherits stdin (NOT System32\\bash.exe, which is WSL)"
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn test_shell() -> String {
+        "bash".to_string()
+    }
+
+    /// Render a path for use *inside* a fixture script.
+    ///
+    /// `Path::display()` yields `C:\Users\…` on Windows. Interpolated into a
+    /// shell script that is a redirect target, bash strips the backslashes and
+    /// writes a file literally named `C:UsersrescueAppData…json` into the
+    /// current directory — which is the crate root under `cargo test`. That is
+    /// where the stray files in `crates/buzz-acp/` came from.
+    fn script_path(path: &std::path::Path) -> String {
+        path.display().to_string().replace('\\', "/")
+    }
+
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn(&test_shell(), &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
+    }
+
+    /// Spawn a fixture and return only once the shell has actually started.
+    ///
+    /// `AcpClient::spawn` returns as soon as the process handle exists — the
+    /// shell may still be loading. Idle-window tests start their clock right
+    /// after and therefore measure **shell startup**, not the behaviour under
+    /// test: the idle timer expires before the script has written its first
+    /// line, and the test sees a timeout it never provoked.
+    ///
+    /// Measured 2026-08-01: `idle_resets_on_stdout_activity` and
+    /// `keepalive_resets_idle_past_deadline` pass in isolation and fail in the
+    /// full 697-test run after ~0.6 s — Windows process startup crosses their
+    /// 100–200 ms idle window once nextest saturates the cores.
+    ///
+    /// The script gets a leading ready marker; this drains it, so the timer
+    /// starts against a shell that has demonstrably produced output. The marker
+    /// is a `session/update` notification because idle-reset only counts valid
+    /// JSON notifications — anything else would change what the test measures.
+    /// Idle window for the two tests that assert on idle-timer resets.
+    ///
+    /// Not a guess: the gap between two fixture messages was measured on this
+    /// Windows host during a full 697-test nextest run — mean **107 ms**, worst
+    /// case **194 ms** for a nominal `sleep 0.05`. Every `sleep` is a real
+    /// process spawn under MSYS, so the shell sets the pace, not the sleep.
+    /// The old 100/200 ms windows sat *inside* that spread, which is exactly
+    /// why both tests passed alone and failed under load. 800 ms keeps ~4×
+    /// headroom over the measured worst case and stays far below the 10 s hard
+    /// deadline, so the assertions can still go red for a real regression.
+    const IDLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(800);
+
+    async fn spawn_script_ready(script: &str) -> AcpClient {
+        const READY: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"testReady"}}}"#;
+        let mut client = spawn_script(&format!("printf '%s\\n' '{READY}'\n{script}")).await;
+        let line = client
+            .reader
+            .next()
+            .await
+            .expect("fixture produced no ready marker")
+            .expect("fixture stdout was not readable");
+        assert!(
+            line.contains("testReady"),
+            "first fixture line must be the ready marker, got: {line}"
+        );
+        client
     }
 
     /// Spawn a probe script whose file name carries a runtime identity (e.g.
@@ -3100,26 +3205,27 @@ mod tests {
     async fn idle_resets_on_stdout_activity() {
         // Send valid JSON (session/update notifications) to reset the idle timer.
         // Non-JSON lines no longer reset idle — only valid JSON notifications do.
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
+        // `for ((...))` instead of `$(seq …)`: every subshell is a real Windows
+        // process spawn, and the gap between messages is what this measures.
+        let mut client = spawn_script_ready(
+            r#"for ((i=0;i<20;i++)); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
         let max_dur = std::time::Duration::from_secs(10);
         let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(200),
-                hard_deadline,
-                max_dur,
-            )
+            .read_until_response_with_idle_timeout("test", 999, IDLE_WINDOW, hard_deadline, max_dur)
             .await;
         let elapsed = start.elapsed();
-        // 10 messages × 50ms = ~500ms of activity, then idle timeout fires after 200ms more
-        assert!(elapsed >= std::time::Duration::from_millis(400));
-        assert!(elapsed < std::time::Duration::from_secs(3));
+        // 20 messages at a measured ~107 ms apart = ~2.1 s of activity, i.e.
+        // more than two idle windows. Without the reset the loop would end
+        // after a single window (~0.8 s) — the lower bound can still go red.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(1200),
+            "activity must reset the idle timer past a single window; elapsed only {elapsed:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(9));
         assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
@@ -3295,32 +3401,26 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
+        // Keepalive session/update lines against a shorter idle deadline.
+        // The turn must survive well past that deadline (proves the fix).
+        let mut client = spawn_script_ready(
+            r#"for ((i=0;i<20;i++)); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
         let max_dur = std::time::Duration::from_secs(10);
         let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(100),
-                hard_deadline,
-                max_dur,
-            )
+            .read_until_response_with_idle_timeout("test", 999, IDLE_WINDOW, hard_deadline, max_dur)
             .await;
         let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
+        // 20 keepalives at a measured ~107 ms apart = ~2.1 s of activity, i.e.
+        // more than two idle windows — well past a single deadline.
         assert!(
-            elapsed >= std::time::Duration::from_millis(500),
+            elapsed >= std::time::Duration::from_millis(1200),
             "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
         );
-        assert!(elapsed < std::time::Duration::from_secs(5));
+        assert!(elapsed < std::time::Duration::from_secs(9));
         assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
@@ -3865,9 +3965,9 @@ mod tests {
         response: &str,
     ) -> AcpClient {
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > '{capture}'; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
+            capture = script_path(capture_path),
             response = response,
         );
         spawn_script(&script).await

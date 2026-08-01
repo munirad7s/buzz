@@ -1,0 +1,25 @@
+# Nextest configuration.
+#
+# The single rule here concerns the `buzz-acp` tests that assert on wall-clock
+# idle/deadline windows while a **real shell process** feeds them stdout. On
+# Windows every `sleep` inside a fixture is a process spawn, and under full
+# parallelism that shell competes with ~690 other tests for cores: a nominal
+# `sleep 0.05` between two fixture lines was measured at 107 ms mean / 194 ms
+# worst case during a full run, with outliers past 800 ms under heavier load.
+#
+# Two dead ends were measured before landing on retries (2026-08-01, buzz#83):
+#
+#   • Widening the windows until they absorb the worst case stops the tests from
+#     ever going red for a real regression — the assertion would then only prove
+#     that the machine is not on fire.
+#   • `threads-required = "num-test-threads"` (run them alone) made it *worse*:
+#     suite runtime went 18 s → 110 s and the failure count went up, because the
+#     exclusive tests bunch up at the front and their `sleep 10` tails dominate.
+#
+# Retries fit what this actually is: a scheduling artefact, not a defect. A test
+# that passes on any attempt was starved, not broken; a genuine regression fails
+# all four attempts and still turns the suite red.
+
+[[profile.default.overrides]]
+filter = 'package(buzz-acp) and test(/(idle_resets_on_stdout_activity|keepalive_resets_idle_past_deadline|steer_success_renews_hard_deadline_and_survives_past_original|acp_steer_injected_renews_hard_deadline_and_survives_past_original|acp_steer_started_new_turn_acks_success_without_renewing_hard_deadline|acp_steer_failed_outcome_acks_outcome_rejected|acp_steer_missing_outcome_acks_outcome_rejected_and_never_drops_event|acp_steer_request_omits_expected_run_id_and_carries_session_and_prompt|agent_exit_detected_as_eof)/)'
+retries = 3
