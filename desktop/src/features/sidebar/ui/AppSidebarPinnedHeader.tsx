@@ -1,4 +1,12 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  Inbox,
+  LayoutDashboard,
+  Zap,
+} from "lucide-react";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -80,6 +88,36 @@ export function AppSidebarPinnedHeader({
   );
 }
 
+/**
+ * Nav entry for the Empire cockpit (fork feature, buzz#15).
+ *
+ * Navigates on its own instead of taking an `onSelect…` prop like its
+ * neighbours: the prop-drilling route would touch AppShell, AppSidebar,
+ * useAppNavigation and the shared `SidebarSelectedView` union for one
+ * fork-local tab. Keeping it self-contained holds the upstream diff at a
+ * single `<FeatureGate>` block.
+ */
+function EmpireCockpitMenuItem() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  return (
+    <FeatureGate feature="empireCockpit">
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          data-testid="open-empire-view"
+          isActive={location.pathname.startsWith("/empire")}
+          onClick={() => void navigate({ to: "/empire" })}
+          tooltip="Empire"
+          type="button"
+        >
+          <LayoutDashboard className="h-4 w-4" />
+          <SidebarMenuLabel>Empire</SidebarMenuLabel>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </FeatureGate>
+  );
+}
+
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
@@ -129,6 +167,7 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>
+        <EmpireCockpitMenuItem />
         <FeatureGate feature="projects">
           <SidebarMenuItem>
             <SidebarMenuButton

@@ -20,6 +20,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "empireCockpit",
+      "name": "Empire Cockpit",
+      "description": "Leadership dashboard: open gates, ready backlog, agent runtime, ritual receipts",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",
