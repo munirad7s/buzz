@@ -442,12 +442,17 @@ block_pay() {
     block_error pay "Mollie /payments HTTP $code ohne verwertbare Liste"; return
   fi
 
-  local since30
+  local since30 since24
   since30="$(date -u -d '-30 days' '+%Y-%m-%d' 2>/dev/null || date -u -v-30d '+%Y-%m-%d')"
+  # Der Morgenbrief fragt „was hat sich seit gestern bewegt", nicht „wie war der
+  # Monat". Ohne eigenes 24-h-Fenster müsste er das aus `last_payments` raten —
+  # und das sind nur die letzten DREI, also eine stille Untergrenze.
+  since24="$(date -u -d '-24 hours' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')"
 
   jq -n \
     --argjson amounts "$SHOW_AMOUNTS" \
     --arg since30 "$since30" \
+    --arg since24 "$since24" \
     --slurpfile subs "$TMP/subs.json" \
     --slurpfile pays "$TMP/pays.json" '
     ($subs[0]._embedded.subscriptions) as $s
@@ -460,6 +465,8 @@ block_pay() {
     # Prüfung ausnahmslos nie begonnene Checkouts waren.
     | ($p30 | map(select((.status=="failed" or .status=="expired") and (.method != null)))) as $real_fail
     | ($p30 | map(select((.status=="failed" or .status=="expired") and (.method == null)))) as $never_started
+    | ($p | map(select(.createdAt >= $since24))) as $p24
+    | ($p24 | map(select(.status=="paid"))) as $paid24
     | {
         state: (if ($act|length) == 0 then "warn"
                 elif ($real_fail|length) > 0 then "warn"
@@ -473,6 +480,16 @@ block_pay() {
         last30_total: ($p30|length),
         last30_failed_after_method: ($real_fail|length),
         last30_never_started: ($never_started|length),
+        # 24-h-Fenster für den Morgenbrief. `payments_window_complete` sagt, ob
+        # die 50 abgeholten Zahlungen überhaupt 24 h abdecken — sonst wäre
+        # "1 Zahlung" eine Untergrenze, die wie eine gemessene Zahl aussieht.
+        last24_total: ($p24|length),
+        last24_paid: ($paid24|length),
+        last24_failed_after_method:
+          ($p24 | map(select((.status=="failed" or .status=="expired") and (.method != null))) | length),
+        last24_paid_eur: (if $amounts == 1 then ($paid24|map(.amount.value|tonumber)|add // 0) else null end),
+        last24_paid_methods: ($paid24 | map(.method // "unbekannt") | unique),
+        payments_window_complete: (($p|length) < 50 or (($p|last|.createdAt) < $since24)),
         mrr_eur: (if $amounts == 1 then ($act|map(.amount.value|tonumber)|add // 0) else null end),
         reason: (if ($act|length) == 0 then "keine aktive Subscription"
                  elif ($real_fail|length) > 0

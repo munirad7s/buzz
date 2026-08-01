@@ -41,7 +41,11 @@ MODE="${1:-}"; shift || true
 
 POST=0; TG=0; VAULT=0; REDACT=0; DRY=0
 BUZZ_CHANNEL=""
-BRIEF_LIMIT="${RITUAL_GATE_LINES:-12}"
+# Sechs statt zwölf: der Batch ist nur etwas wert, wenn Munir ihn abends
+# wirklich durchgeht. Zwölf Entscheidungen sind auf dem Telefon eine Wand und
+# werden weggewischt; die Sortierung (P1-money zuerst) sorgt dafür, dass die
+# sechs teuersten oben stehen, und der Rest wird gezählt statt verschwiegen.
+BRIEF_LIMIT="${RITUAL_GATE_LINES:-6}"
 SECRETS_FILE="${SECRETS_FILE:-$HOME/.secrets/master.env}"
 PRIORITIES="${LAGEBILD_PRIORITIES:-C:/Users/rescue/projects/adas-empire/priorities.json}"
 EXTRA_REPOS="${RITUAL_EXTRA_REPOS:-munirad7s/buzz}"
@@ -82,10 +86,23 @@ for t in jq curl gh; do command -v "$t" >/dev/null || { echo "$t fehlt" >&2; exi
 
 CR=$'\r'
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-DATE_DE="$(date '+%a %d.%m.%Y')"
+# Der Brief spricht Deutsch — auch im Datum. `date '+%a'` liefert unter MSYS
+# "Sat", und ein englischer Wochentag in einem deutschen Brief ist genau die
+# Sorte Systemgeruch, die hier weg soll.
+DATE_DE="$(printf '%s, %s' \
+  "$(printf 'Sonntag Montag Dienstag Mittwoch Donnerstag Freitag Samstag' | cut -d' ' -f$(( $(date '+%w') + 1 )))" \
+  "$(date '+%d.%m.%Y')")"
 CLOCK="$(date '+%H:%M')"
+# Eine Lücke gehört dorthin, wo der Leser sie sonst als 0 lesen würde — nicht in
+# einen Sammelblock am Ende. Deshalb trägt jede Lücke ihre Zielabschnitte mit
+# (Leerzeichen-getrennt): geld · menschen · tag · laeuft · entscheidungen · sonst.
 GAPFILE="$TMP/gaps"; : > "$GAPFILE"
-gap() { printf '%s\n' "$1" >> "$GAPFILE"; }
+gap() { printf '%s\t%s\n' "$1" "$2" >> "$GAPFILE"; }
+gaps_for() { awk -F'\t' -v w="$1" '{n=split($1,c," "); for(i=1;i<=n;i++) if(c[i]==w){print $2; break}}' "$GAPFILE"; }
+gaps_flat() { cut -f2- "$GAPFILE"; }
+# Im Brief steht kein Stichwort-Fragment, sondern ein Satz — auch die Luecke.
+gaps_satz() { gaps_for "$1" | sed 's/[^.…!?]$/&./'; }
+has_gap() { [ -n "$(gaps_for "$1")" ]; }
 gapcount() { wc -l < "$GAPFILE" | tr -d ' '; }
 
 # Woche = ISO-Woche (Mo–So). Der Sonntag 18:00-Lauf schaut auf die Woche, in der
@@ -99,11 +116,12 @@ WEEK_LABEL="KW $(date '+%V') ($(date -d "$WEEK_START" '+%d.%m.') – $(date '+%d
 
 # (a) Lagebild — buzz#7. Nicht nachbauen, benutzen.
 collect_lagebild() {
-  local blocks="$1"
-  bash "$HERE/lagebild.sh" --format json --blocks "$blocks" > "$TMP/lage.json" 2>"$TMP/lage.err"
+  local blocks="$1" extra="${2:-}"
+  # $extra ist bewusst unquoted: es traegt hoechstens das Wort --amounts.
+  bash "$HERE/lagebild.sh" --format json --blocks "$blocks" $extra > "$TMP/lage.json" 2>"$TMP/lage.err"
   local rc=$?
   if [ ! -s "$TMP/lage.json" ] || ! jq -e . "$TMP/lage.json" >/dev/null 2>&1; then
-    gap "Lagebild (#7) lieferte kein verwertbares JSON (exit $rc): $(head -c 120 "$TMP/lage.err" | tr -d '\n')"
+    gap "geld laeuft entscheidungen" "Das Lagebild hat nichts geliefert (exit $rc): $(head -c 120 "$TMP/lage.err" | tr -d '\n')"
     rm -f "$TMP/lage.json"; return 1
   fi
   # Ein Block, der sich selbst als tot meldet, ist eine Lücke — keine 0.
@@ -116,13 +134,18 @@ collect_lagebild() {
   local b
   for b in backlog n8n server pay; do
     case ",$blocks," in *",$b,"*) ;; *) continue ;; esac
-    local st reason
+    local st reason cat name
     st="$(jq -r --arg b "$b" '.[$b].state // "fehlt"' "$TMP/lage.json" | tr -d "$CR")"
     reason="$(jq -r --arg b "$b" '.[$b].reason // "ohne Begründung"' "$TMP/lage.json" | tr -d "$CR")"
+    case "$b" in
+      backlog) cat="entscheidungen"; name="der Backlog" ;;
+      pay)     cat="geld";           name="die Zahlungen" ;;
+      *)       cat="laeuft";         name="$b" ;;
+    esac
     case "$st" in
       ok) ;;
-      warn) [ "$b" = "backlog" ] && gap "Lagebild/backlog unvollständig: $reason" ;;
-      *)    gap "Lagebild/$b NICHT erhoben ($st): $reason" ;;
+      warn) [ "$b" = "backlog" ] && gap "$cat" "Der Backlog wurde nur unvollständig gelesen: $reason" ;;
+      *)    gap "$cat" "Ich konnte $name nicht messen ($st): $reason" ;;
     esac
   done
   return 0
@@ -139,9 +162,9 @@ repo_list() {
              --json repository -L "$lim" 2>/dev/null \
            | jq -r '.[].repository.nameWithOwner' 2>/dev/null | tr -d "$CR")"
   if [ -z "$found" ]; then
-    gap "Repo-Suche (gh search) lieferte nichts — Repo-Menge nur aus priorities.json, evtl. unvollständig"
+    gap "entscheidungen" "Die Projektsuche hat nichts zurückgegeben — ich kenne heute nur die gepflegte Projektliste, es können Projekte fehlen"
   elif [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" -ge "$lim" ]; then
-    gap "Repo-Suche am Limit ($lim) — es können weitere Repos mit blocked-munir existieren"
+    gap "entscheidungen" "Die Projektsuche lief ins Limit ($lim) — es können weitere Projekte mit offenen Entscheidungen existieren"
   fi
   { jq -r '.repo_order[].repo' "$PRIORITIES" 2>/dev/null; printf '%s\n' $EXTRA_REPOS; printf '%s\n' "$found"; } \
     | tr -d "$CR" | awk 'NF' | sort -u > "$TMP/repolist.txt"
@@ -157,8 +180,11 @@ collect_blocked() {
     [ -z "$repo" ] && continue
     (
       slug="$(printf '%s' "$repo" | tr '/' '~')"
+      # `body` kommt mit: der Gate-Batch schreibt die Folgen eines Ja und eines
+      # Nein aus, und die stehen im Ticket selbst (## Mission / ## Money-Link).
+      # Ohne den Text müsste der Brief sie erfinden — das ist verboten.
       if out="$(gh issue list -R "$repo" --state open --label blocked-munir -L "$limit" \
-                 --json number,title,labels,createdAt,url 2>/dev/null </dev/null)"; then
+                 --json number,title,labels,createdAt,url,body 2>/dev/null </dev/null)"; then
         printf '%s' "$out" | jq --arg repo "$repo" 'map(. + {repo:$repo})' > "$TMP/bl/$slug.json" 2>/dev/null
       fi
     ) &
@@ -170,46 +196,166 @@ collect_blocked() {
     [ -z "$repo" ] && continue
     [ -f "$TMP/bl/$(printf '%s' "$repo" | tr '/' '~').json" ] || unreadable="$unreadable $repo"
   done < <(repo_list)
-  [ -n "$unreadable" ] && gap "blocked-munir nicht lesbar für:$unreadable (fehlen in der Summe, zählen NICHT als 0)"
+  # Eine Liste mit 25 Repo-Namen ist im Brief eine Wand. Zahl + Beispiele
+  # sagen dasselbe und bleiben lesbar; die Vollstaendigkeit steht im Log.
+  [ -n "$unreadable" ] && gap "entscheidungen" "$(kuerzeliste "$unreadable" "Projekte konnte ich nicht lesen") — was dort auf dich wartet, fehlt hier (das ist keine Null)"
 
   if ! ls "$TMP/bl"/*.json >/dev/null 2>&1; then
-    gap "blocked-munir: kein einziges Repo lesbar — Gate-Batch hat keine Datenbasis"
+    gap "entscheidungen" "Kein einziges Projekt war lesbar — ich weiß heute nicht, was auf dich wartet"
     # KEINE leere Liste erzeugen. Eine leere Liste wäre eine stille Null und
     # der Batch würde "Heute kein Munir-Gate" melden — die gefährlichste
     # denkbare Falschaussage dieses Rituals (gemessen als Bug, dann behoben).
     return 1
   fi
-  jq -s 'add | map({repo, number, url, title,
+  jq -s 'add | map({repo, number, url, title, body,
                     labels: (.labels|map(.name)),
                     createdAt})
         | sort_by( (if (.labels|index("P1-money")) then 0
                     elif (.labels|index("P1")) then 1
                     elif (.labels|index("P2")) then 2 else 3 end), .createdAt )' \
     "$TMP/bl"/*.json > "$TMP/blocked.json" 2>/dev/null \
-    || { gap "blocked-munir: Aggregation fehlgeschlagen"; rm -f "$TMP/blocked.json"; return 1; }
+    || { gap "entscheidungen" "Die offenen Entscheidungen ließen sich nicht zusammenführen"; rm -f "$TMP/blocked.json"; return 1; }
   jq -e 'type == "array"' "$TMP/blocked.json" >/dev/null 2>&1 \
-    || { gap "blocked-munir: Aggregat ist kein Array"; rm -f "$TMP/blocked.json"; return 1; }
+    || { gap "entscheidungen" "Die Liste der offenen Entscheidungen kam beschädigt zurück"; rm -f "$TMP/blocked.json"; return 1; }
   return 0
 }
 
-# (c) Inbox — google-mcp über den MCP-Adapter. Kein Send-Pfad, nur lesen.
-collect_inbox() {
-  local out
+# (c) Menschen — wer geschrieben hat und wer wartet.
+#
+# Der Brief zählt keine Nachrichten mehr, er nennt Menschen. Grund, gemessen am
+# 01.08.: die 50 neuesten Posteingangs-Nachrichten der letzten FÜNF Tage waren
+# ausnahmslos Maschinen — GitHub-CI, das eigene Monitoring, Revolut, Werbung.
+# Die alte Zeile "≥50 neue, davon ≥43 ungelesen" maß also reines CI-Rauschen,
+# und weil gmail_search bei 50 deckelt, wäre eine echte Kundenmail dahinter
+# UNSICHTBAR geblieben. Deshalb wird das Rauschen serverseitig ausgeschlossen,
+# bevor der Deckel greift — und das, was danach übrig bleibt, wird namentlich
+# genannt statt gezählt.
+# Was hier hängen bleibt, ist gemessen und nicht geraten (Absenderliste vom
+# 01.08.): Absender, die nie antworten (no-reply, mailer-daemon, Versand-
+# Subdomains), Rollen-Postfächer von Dienstleistern (support@, service@,
+# invoice…, billing@) — und, der größte Posten, Munirs EIGENE Systeme, die ihm
+# in sein eigenes Postfach schreiben (mondsamt@, autopilot@, foerderwerk@,
+# kontakt@ auf den eigenen Domains). Ein Kunde schreibt nicht von adas.team.
+# Bewusster Preis: schriebe ein echter Kunde von support@seinefirma.de, landete
+# er in dieser Zählung. Deshalb steht die Zahl der Aussortierten IM Brief —
+# sichtbar falsch ist besser als unsichtbar weg.
+MACHINE_RE='noreply|no-reply|no_reply|donotreply|do-not-reply|mailer-daemon|postmaster|bounce|notifications@|notification@|newsletter|@notify\.|@mail\.|@email\.|@e\.|automated|@bot\.|^support@|^service@|^alerts?@|^invoice|^billing@|^team@|^accounts?@|^security@'
+OWN_DOMAINS="${RITUAL_OWN_DOMAINS:-adas\.team|adasgroup\.de|adas\.jetzt|adas\.casa}"
+PEOPLE_CAP=8
+REST_CAP=3
+collect_people() {
+  local out q
+  # Serverseitig weg: eigene Post, Chats, Entwürfe, Werbung, Soziales und die
+  # beiden gemessen lautesten Absender. Fenster 7 Tage, damit "wartet seit
+  # vorgestern" überhaupt sichtbar werden kann.
+  # Der Ausschluss gehoert in die ABFRAGE, nicht hinter sie: gmail_search
+  # deckelt bei 50, und wenn 48 dieser 50 Plaetze von Maschinen belegt sind,
+  # bleibt eine echte Kundenmail unsichtbar hinter dem Deckel. Gemessen genau
+  # so am 01.08. Was hier serverseitig wegfaellt, faellt drinnen nochmal durch
+  # MACHINE_RE — zwei Netze, weil das Gmail-Matching unscharf ist.
+  q='in:inbox newer_than:7d -in:sent -in:chats -in:drafts'
+  q="$q -category:promotions -category:social"
+  q="$q -from:notifications@github.com -from:adas.team -from:adasgroup.de"
+  q="$q -from:noreply -from:no-reply -from:mailer-daemon -from:notification"
   if ! out="$(node "$HERE/mcp-call.mjs" --server google-mcp --tool gmail_search \
               --config "$MCP_CONFIG" --timeout 90000 \
-              --args '{"query":"newer_than:1d -in:sent -in:chats -in:drafts","maxResults":50}' 2>"$TMP/inbox.err")"; then
-    gap "Inbox (Gmail via google-mcp) nicht erhoben: $(head -c 140 "$TMP/inbox.err" | tr -d '\n')"
+              --args "$(jq -cn --arg q "$q" '{query:$q, maxResults:50}')" 2>"$TMP/people.err")"; then
+    gap "menschen" "Ich komme heute nicht ans Postfach: $(head -c 120 "$TMP/people.err" | tr -d '\n'). Ob jemand geschrieben hat, weiß ich nicht."
     return 1
   fi
   printf '%s' "$out" | jq -e '.messages' >/dev/null 2>&1 || {
-    gap "Inbox lieferte kein verwertbares Ergebnis (Antwort ohne .messages)"; return 1; }
-  printf '%s' "$out" > "$TMP/inbox.json"
-  # Gmail deckelt bei maxResults. "50 neue" wäre sonst eine stille Untergrenze,
-  # die wie eine gemessene Zahl aussieht.
-  if [ "$(jq -r '.messages|length' "$TMP/inbox.json")" -ge 50 ]; then
-    gap "Inbox-Abfrage am Limit (50) — die Zahl ist eine Untergrenze, kein Gesamtstand"
-    echo 1 > "$TMP/inbox.capped"
+    gap "menschen" "Das Postfach hat geantwortet, aber ohne Nachrichtenliste — ob jemand geschrieben hat, weiß ich nicht."; return 1; }
+  printf '%s' "$out" > "$TMP/mail.json"
+  [ "$(jq -r '.messages|length' "$TMP/mail.json")" -ge 50 ] && \
+    gap "menschen" "Das Postfach lief ins Abfrage-Limit (50) — es können ältere Nachrichten fehlen"
+
+  # Maschinen aussortieren. Die Zahl der Aussortierten wird genannt, nicht
+  # verschwiegen: sonst sähe ein leerer Menschen-Block wie ein Messfehler aus.
+  jq --arg re "$MACHINE_RE" --arg own "$OWN_DOMAINS" '
+    def addr: (.from | capture("<(?<a>[^>]+)>").a) // .from | ascii_downcase;
+    def person: (.from | sub(" *<.*>$";"") | sub("^\"";"") | sub("\"$";"") | gsub("^ +| +$";""));
+    [ .messages[] | . + {email: addr, person: (if (person|length) > 0 then person else addr end)} ]
+    | map(. + {machine: ((.email | test($re)) or (.email | test("@(" + $own + ")$")))})
+    | {humans: [.[] | select(.machine|not)], machines: ([.[] | select(.machine)] | length)}
+  ' "$TMP/mail.json" > "$TMP/people-raw.json" 2>/dev/null \
+    || { gap "menschen" "Die Post ließ sich nicht auswerten — ob jemand geschrieben hat, weiß ich nicht."; return 1; }
+
+  # Einordnung: zahlender Kunde vor Interessent vor Rest. Zwei Quellen, beide
+  # nur lesend — Vault-Kundenordner (Zusagen-Kanon) und CRM (Pipeline-Wahrheit).
+  local vaultdir="${RITUAL_CLIENT_DIR:-$HOME/Documents/Ai_Brain/04 Areas/clients}"
+  if [ -d "$vaultdir" ]; then
+    ls -1 "$vaultdir" 2>/dev/null | sed 's#/$##' | grep -v '^_' | grep -v '\.md$' > "$TMP/clients.txt"
+  else
+    : > "$TMP/clients.txt"
+    gap "menschen" "Die Kundenliste im Vault ist nicht lesbar ($vaultdir) — ich kann heute nicht sagen, wer davon zahlender Kunde ist"
   fi
+
+  local n; n="$(jq -r '.humans|length' "$TMP/people-raw.json")"
+  if [ "$n" -gt "$PEOPLE_CAP" ]; then
+    gap "menschen" "Mehr als $PEOPLE_CAP Menschen im Fenster — ich habe nur die $PEOPLE_CAP jüngsten eingeordnet"
+  fi
+
+  mkdir -p "$TMP/crm"
+  local i=0 mail
+  while IFS= read -r mail; do
+    [ -z "$mail" ] && continue
+    i=$((i+1)); [ "$i" -gt "$PEOPLE_CAP" ] && break
+    (
+      for ent in Contact Lead; do
+        node "$HERE/mcp-call.mjs" --server espo-mcp --tool espo_search \
+          --config "$MCP_CONFIG" --timeout 60000 \
+          --args "$(jq -cn --arg q "$mail" --arg e "$ent" '{entityType:$e, query:$q, maxSize:3}')" \
+          > "$TMP/crm/$i.$ent.json" 2>/dev/null || rm -f "$TMP/crm/$i.$ent.json"
+      done
+    ) &
+  done < <(jq -r '.humans[].email' "$TMP/people-raw.json" | awk '!seen[$0]++')
+  wait
+
+  # Ein CRM, das nicht antwortet, darf nicht wie "kein Kunde" aussehen.
+  local crm_ok=1
+  if [ "$n" -gt 0 ] && ! ls "$TMP/crm"/*.json >/dev/null 2>&1; then
+    crm_ok=0
+    gap "menschen" "Das CRM hat nicht geantwortet — ich konnte nicht prüfen, wer davon Kunde und wer Interessent ist"
+  fi
+
+  # Die Einordnung bleibt in der Shell: jq soll nicht raten, welche CRM-Antwort
+  # zu welchem Menschen gehört — das weiß nur die Schleife, die sie geholt hat.
+  : > "$TMP/people.jsonl"
+  i=0
+  while IFS= read -r mail; do
+    [ -z "$mail" ] && continue
+    i=$((i+1)); [ "$i" -gt "$PEOPLE_CAP" ] && break
+    local klasse="" quelle=""
+    if [ -s "$TMP/crm/$i.Contact.json" ] && [ "$(jq -r '.total // 0' "$TMP/crm/$i.Contact.json" 2>/dev/null || echo 0)" -gt 0 ]; then
+      klasse="kunde"; quelle="CRM-Kontakt"
+    elif [ -s "$TMP/crm/$i.Lead.json" ] && [ "$(jq -r '.total // 0' "$TMP/crm/$i.Lead.json" 2>/dev/null || echo 0)" -gt 0 ]; then
+      if jq -e '[.list[].status] | index("Converted")' "$TMP/crm/$i.Lead.json" >/dev/null 2>&1; then
+        klasse="kunde"; quelle="CRM (gewonnen)"
+      else
+        klasse="interessent"; quelle="CRM-Lead"
+      fi
+    fi
+    # Vault schlägt CRM: dort stehen die Zusagen, und ein Ordner unter
+    # 04 Areas/clients existiert nur für jemanden, mit dem es echt läuft.
+    local dom slug
+    dom="$(printf '%s' "$mail" | sed 's/.*@//; s/\.[a-z]*$//' | tr 'A-Z' 'a-z')"
+    if [ -n "$dom" ] && [ -s "$TMP/clients.txt" ]; then
+      slug="$(grep -i -m1 -- "$dom" "$TMP/clients.txt" 2>/dev/null || true)"
+      [ -n "$slug" ] && { klasse="kunde"; quelle="Kundenordner $slug"; }
+    fi
+    jq -c --arg mail "$mail" --arg k "$klasse" --arg q "$quelle" '
+      [.humans[] | select(.email == $mail)] | sort_by(.date) | last
+      | {person, email, subject, date, unread: ((.labelIds//[]) | index("UNREAD") != null),
+         klasse: $k, quelle: $q, anzahl: 1}' "$TMP/people-raw.json" >> "$TMP/people.jsonl" 2>/dev/null
+  done < <(jq -r '.humans[].email' "$TMP/people-raw.json" | awk '!seen[$0]++')
+
+  jq -s --argjson machines "$(jq -r '.machines' "$TMP/people-raw.json")" \
+        --argjson crm_ok "$crm_ok" \
+        --argjson total "$n" '
+     { machines: $machines, crm_ok: $crm_ok, total_humans: $total,
+       people: (. | sort_by(if .klasse=="kunde" then 0 elif .klasse=="interessent" then 1 else 2 end,
+                            .date) ) }' "$TMP/people.jsonl" > "$TMP/people.json" 2>/dev/null \
+    || { gap "menschen" "Die Menschen-Liste ließ sich nicht zusammenstellen"; rm -f "$TMP/people.json"; return 1; }
   return 0
 }
 
@@ -227,15 +373,15 @@ collect_calendar() {
               --config "$MCP_CONFIG" --timeout 90000 \
               --args "{\"calendarId\":\"ALL\",\"timeMin\":\"$from\",\"timeMax\":\"$to\",\"maxResults\":40}" \
               2>"$TMP/cal.err")"; then
-    gap "Termine (Kalender via google-mcp) nicht erhoben: $(head -c 140 "$TMP/cal.err" | tr -d '\n')"
+    gap "tag" "Deinen Kalender habe ich heute nicht erreicht: $(head -c 120 "$TMP/cal.err" | tr -d '\n'). Verlass dich nicht darauf, dass der Tag frei ist."
     return 1
   fi
   printf '%s' "$out" | jq -e '.events' >/dev/null 2>&1 || {
-    gap "Kalender lieferte kein verwertbares Ergebnis (Antwort ohne .events)"; return 1; }
+    gap "tag" "Der Kalender hat geantwortet, aber ohne Termine — verlass dich nicht darauf, dass der Tag frei ist."; return 1; }
   printf '%s' "$out" > "$TMP/cal.json"
   # Ein einzelner unlesbarer Kalender darf nicht wie ein leerer Tag aussehen.
   local bad; bad="$(jq -r '.unreadable|length' "$TMP/cal.json")"
-  [ "$bad" -gt 0 ] && gap "Kalender unvollständig — $bad Kalender nicht lesbar (die Terminliste ist eine Untermenge)"
+  [ "$bad" -gt 0 ] && gap "tag" "$bad Kalender waren nicht lesbar — die Terminliste ist unvollständig"
   return 0
 }
 
@@ -260,7 +406,7 @@ collect_nest() {
     local why; why="$(head -c 140 "$TMP/nest.err" | tr -d '\n')"
     [ -n "$why" ] || why="$(head -c 140 "$TMP/nest.json" | tr -d '\n')"
     [ -n "$why" ] || why="keine Ausgabe"
-    gap "Nest-Doctor (#59) lieferte kein verwertbares JSON (exit $rc): $why"
+    gap "laeuft" "Den Werkzeug-Check konnte ich nicht ausführen (exit $rc): $why"
     rm -f "$TMP/nest.json"; return 1
   fi
   return 0
@@ -287,7 +433,7 @@ collect_nest() {
 # UTC (gemessen: NOW() == UTC_TIMESTAMP()). NOW() - INTERVAL 24 HOUR ist damit
 # derselbe Rahmen wie die Daten — keine Zeitzonen-Verschiebung nötig.
 collect_crm_deletions() {
-  command -v ssh >/dev/null || { gap "CRM-Löschspur nicht erhoben: ssh nicht im PATH"; return 1; }
+  command -v ssh >/dev/null || { gap "sonst" "Die Löschspur im CRM habe ich nicht geprüft (ssh fehlt) — das ist kein \"nichts gelöscht\""; return 1; }
   { printf 'CRM_DB_CONTAINER=%s\n' "${RITUAL_CRM_CONTAINER:-agency-crm-mariadb}"
     printf 'CRM_WINDOW_H=%s\n' "${RITUAL_CRM_WINDOW_H:-24}"
     # Fenster-Ende = NOW - OFFSET. Default 0 = bis jetzt. Mit Offset lässt sich
@@ -326,11 +472,11 @@ REMOTE
   # Sentinel wie beim Server-Block: ein halb durchgelaufener ssh-Block ist ein
   # Fehler, kein "0 Löschungen".
   if ! grep -q '^REMOTE_DONE=1$' "$TMP/crm.raw" 2>/dev/null; then
-    gap "CRM-Löschspur nicht erhoben: ssh unvollständig ($(head -c 120 "$TMP/crm.err" 2>/dev/null | tr '\n' ' '))"
+    gap "sonst" "Die Löschspur im CRM habe ich nicht geprüft: $(head -c 100 "$TMP/crm.err" 2>/dev/null | tr '\n' ' ') — das ist kein \"nichts gelöscht\""
     rm -f "$TMP/crm.raw"; return 1
   fi
   if ! grep -q '^crm_ok=1$' "$TMP/crm.raw"; then
-    gap "CRM-Löschspur nicht erhoben: $(grep -m1 '^crm_err=' "$TMP/crm.raw" | cut -d= -f2- || echo 'ohne Begründung')"
+    gap "sonst" "Die Löschspur im CRM habe ich nicht geprüft: $(grep -m1 '^crm_err=' "$TMP/crm.raw" | cut -d= -f2- || echo 'ohne Begründung') — das ist kein \"nichts gelöscht\""
     rm -f "$TMP/crm.raw"; return 1
   fi
   return 0
@@ -342,13 +488,16 @@ REMOTE
 # Limit sichtbar (Repo am Limit → Lücke, nicht "genau 100").
 CLOSED_LIMIT=200
 collect_closed() {
+  # Das Fenster ist ein Parameter: das Wochen-Review fragt nach der Woche, der
+  # Gate-Batch am Abend nach HEUTE. Zwei Leser, zwei Zeitraeume, ein Sammler.
+  local seit="${1:-$WEEK_START}"
   local repo capped="" unreadable=""
   mkdir -p "$TMP/cl"
   while IFS= read -r repo; do
     [ -z "$repo" ] && continue
     (
       slug="$(printf '%s' "$repo" | tr '/' '~')"
-      if out="$(gh issue list -R "$repo" --state closed --search "closed:>=$WEEK_START" \
+      if out="$(gh issue list -R "$repo" --state closed --search "closed:>=$seit" \
                  -L "$CLOSED_LIMIT" --json number,title,labels,closedAt,url 2>/dev/null </dev/null)"; then
         printf '%s' "$out" | jq --arg repo "$repo" 'map({repo:$repo, number, title, url, closedAt,
                                                          labels:(.labels|map(.name))})' \
@@ -365,15 +514,15 @@ collect_closed() {
     if [ ! -f "$f" ]; then unreadable="$unreadable $repo"; continue; fi
     [ "$(jq -r 'length' "$f" 2>/dev/null || echo 0)" -ge "$CLOSED_LIMIT" ] && capped="$capped $repo"
   done < <(repo_list)
-  [ -n "$unreadable" ] && gap "geschlossene Issues nicht lesbar für:$unreadable (fehlen in der Summe, zählen NICHT als 0)"
-  [ -n "$capped" ] && gap "geschlossene Issues am Limit ($CLOSED_LIMIT) in:$capped — die Summe ist eine Untergrenze"
+  [ -n "$unreadable" ] && gap "sonst" "$(kuerzeliste "$unreadable" "Projekte konnte ich nicht auf fertige Aufgaben prüfen") — sie fehlen in der Summe und zählen NICHT als 0"
+  [ -n "$capped" ] && gap "sonst" "geschlossene Aufgaben am Limit ($CLOSED_LIMIT) in:$capped — die Summe ist eine Untergrenze"
 
   if ! ls "$TMP/cl"/*.json >/dev/null 2>&1; then
-    gap "geschlossene Issues: kein einziges Repo lesbar — Bewegungs-Block hat keine Datenbasis"
+    gap "sonst" "Kein einziges Projekt war lesbar — was heute fertig wurde, weiß ich nicht"
     return 1
   fi
   jq -s 'add | sort_by(.closedAt) | reverse' "$TMP/cl"/*.json > "$TMP/closed.json" 2>/dev/null \
-    || { gap "geschlossene Issues: Aggregation fehlgeschlagen"; rm -f "$TMP/closed.json"; return 1; }
+    || { gap "sonst" "Die geschlossenen Aufgaben ließen sich nicht zusammenführen"; rm -f "$TMP/closed.json"; return 1; }
   return 0
 }
 
@@ -386,11 +535,11 @@ collect_fillers() {
   local out
   if ! out="$(gh search issues --owner munirad7s --state open --label ready --label P1 \
                --sort created --order asc --json repository,number,title,labels -L 30 2>/dev/null)"; then
-    gap "Vorschlag: P1-Auffüller nicht erhoben (gh search fehlgeschlagen) — Block 4 kann kürzer als 3 sein"
+    gap "sonst" "Vorschlag: P1-Auffüller nicht erhoben (gh search fehlgeschlagen) — Block 4 kann kürzer als 3 sein"
     return 1
   fi
   printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || {
-    gap "Vorschlag: P1-Auffüller lieferte kein Array — Block 4 kann kürzer als 3 sein"; return 1; }
+    gap "sonst" "Vorschlag: P1-Auffüller lieferte kein Array — Block 4 kann kürzer als 3 sein"; return 1; }
   printf '%s' "$out" | jq '[.[] | {repo: .repository.nameWithOwner, number, title,
                                    labels: (.labels|map(.name))}
                             | select((.labels|index("blocked-munir"))|not)
@@ -403,27 +552,27 @@ collect_fillers() {
 # sie, ist das eine LÜCKE und keine "0 Bewegung". Genau diese Verwechslung wäre
 # im ersten Lauf die gefährlichste Falschaussage des Rituals.
 load_prev_snapshot() {
-  [ -d "$SNAPDIR" ] || { gap "Vergleichsbasis fehlt — noch kein Snapshot-Verzeichnis ($SNAPDIR). Die Bewegungszahlen unter 3) sind NICHT 0, sondern unbekannt."; return 1; }
+  [ -d "$SNAPDIR" ] || { gap "sonst" "Vergleichsbasis fehlt — noch kein Snapshot-Verzeichnis ($SNAPDIR). Die Bewegungszahlen unter 3) sind NICHT 0, sondern unbekannt."; return 1; }
   local prev
   prev="$(ls -1 "$SNAPDIR"/*.json 2>/dev/null | sort | awk -v cur="$SNAPDIR/$WEEK_ID.json" '$0 < cur' | tail -1)"
   if [ -z "$prev" ] || [ ! -s "$prev" ] || ! jq -e '.blocked' "$prev" >/dev/null 2>&1; then
-    gap "Vergleichsbasis fehlt — kein verwertbarer Snapshot vor $WEEK_ID. Die Bewegungszahlen unter 3) sind NICHT 0, sondern unbekannt."
+    gap "sonst" "Vergleichsbasis fehlt — kein verwertbarer Snapshot vor $WEEK_ID. Die Bewegungszahlen unter 3) sind NICHT 0, sondern unbekannt."
     return 1
   fi
   cp "$prev" "$TMP/prev.json"
   PREV_WEEK="$(jq -r '.week // "unbekannt"' "$TMP/prev.json")"
   # Ein Snapshot, dem Repos fehlten, erzeugt Phantom-"neu" und Phantom-"gelöst".
   local pu; pu="$(jq -r '.repos_unreadable // [] | join(" ")' "$TMP/prev.json")"
-  [ -n "$pu" ] && gap "Vergleichs-Snapshot $PREV_WEEK war unvollständig (nicht gelesen: $pu) — neu/gelöst können Messartefakte enthalten"
+  [ -n "$pu" ] && gap "sonst" "Vergleichs-Snapshot $PREV_WEEK war unvollständig (nicht gelesen: $pu) — neu/gelöst können Messartefakte enthalten"
   return 0
 }
 
 write_snapshot() {
   [ "$SNAPSHOT" = "1" ] || { echo "snapshot: --no-snapshot gesetzt, nichts geschrieben" >&2; return 0; }
-  mkdir -p "$SNAPDIR" || { gap "Snapshot-Verzeichnis $SNAPDIR nicht anlegbar — nächste Woche fehlt die Vergleichsbasis"; return 1; }
+  mkdir -p "$SNAPDIR" || { gap "sonst" "Snapshot-Verzeichnis $SNAPDIR nicht anlegbar — nächste Woche fehlt die Vergleichsbasis"; return 1; }
   local unread="[]"
-  grep -q 'blocked-munir nicht lesbar' "$GAPFILE" 2>/dev/null && \
-    unread="$(grep -m1 'blocked-munir nicht lesbar' "$GAPFILE" | sed 's/.*für://; s/ (fehlen.*//' | tr ' ' '\n' | awk 'NF' | jq -R . | jq -s .)"
+  grep -q 'Diese Projekte konnte ich nicht lesen' "$GAPFILE" 2>/dev/null && \
+    unread="$(grep -m1 'Diese Projekte konnte ich nicht lesen' "$GAPFILE" | sed 's/.*lesen://; s/ — was dort.*//' | tr ' ' '\n' | awk 'NF' | jq -R . | jq -s .)"
   jq -n \
     --arg week "$WEEK_ID" --arg start "$WEEK_START" --arg at "$(date -Is)" \
     --argjson blocked "$( [ -f "$TMP/blocked.json" ] && jq '[.[] | "\(.repo)#\(.number)"]' "$TMP/blocked.json" || echo null )" \
@@ -434,7 +583,7 @@ write_snapshot() {
       blocked:$blocked, blocked_count:($blocked|if .==null then null else length end),
       closed_count:$closed, pay:$pay, repos_unreadable:$unread}' \
     > "$SNAPDIR/$WEEK_ID.json" 2>/dev/null \
-    || { gap "Snapshot $WEEK_ID.json konnte nicht geschrieben werden"; return 1; }
+    || { gap "sonst" "Snapshot $WEEK_ID.json konnte nicht geschrieben werden"; return 1; }
   echo "snapshot: $SNAPDIR/$WEEK_ID.json geschrieben" >&2
   return 0
 }
@@ -442,10 +591,10 @@ write_snapshot() {
 # (d) Foki — die drei #-Überschriften aus Now.md. Vault ist Kanon.
 collect_foki() {
   if [ ! -f "$NOW_MD" ]; then
-    gap "Now.md nicht lesbar ($NOW_MD) — Top-3 fehlen"; return 1
+    gap "sonst" "Now.md nicht lesbar ($NOW_MD) — Top-3 fehlen"; return 1
   fi
   grep -E '^## #[123] ' "$NOW_MD" | sed -E 's/^## #[123] //' | head -3 > "$TMP/foki.txt"
-  [ -s "$TMP/foki.txt" ] || { gap "Now.md enthält keine '## #1..#3'-Foki — Top-3 fehlen"; return 1; }
+  [ -s "$TMP/foki.txt" ] || { gap "sonst" "Now.md enthält keine '## #1..#3'-Foki — Top-3 fehlen"; return 1; }
   return 0
 }
 
@@ -460,155 +609,417 @@ prio_of() { # erstes echtes Prio-Label
          elif (.labels|index("P3")) then "P3" else "-" end'
 }
 
-render_gate_lines() { # $1 = Anzahl
+# ---------------------------------------------------------------- Sprache
+#
+# Munir liest den Brief um 08:45 auf dem Telefon, mit einem drei Wochen alten
+# Baby und zwei Drittversuch-Klausuren in der Woche. Er hat zwei Minuten. Was
+# hier steht, muss in ganzen Sätzen stehen, kurz sein und ohne Fachjargon
+# auskommen — Ticket-Nummern gehören in Klammern ans Zeilenende, nie in den
+# Satz. Deshalb rendern die Briefe REINEN TEXT: kein Markdown, keine Tabellen,
+# keine Codeblöcke. Was auf dem Telefon zerfallen kann, kommt hier nicht vor.
+
+WOCHENTAG_DE="Sonntag Montag Dienstag Mittwoch Donnerstag Freitag Samstag"
+ZAHL_DE="null eine zwei drei vier fünf sechs sieben acht neun zehn elf zwölf"
+
+zahlwort() { # 3 -> "drei"; ab 13 die Ziffer (Zahlwörter werden dann unlesbar)
   local n="$1"
-  jq -r --argjson n "$n" --argjson redact "$REDACT" '
-    def prio: if (.labels|index("P1-money")) then "💶P1-money"
-              elif (.labels|index("P1")) then "P1"
-              elif (.labels|index("P2")) then "P2"
-              elif (.labels|index("P3")) then "P3" else "—" end;
-    .[0:$n] | to_entries[] |
-    "\(.key+1). \(.value.repo|sub("^munirad7s/";""))#\(.value.number) [\(.value|prio)] — " +
-    (if $redact == 1 then "‹Titel geschwärzt›" else (.value.title|.[0:95]) end)
-  ' "$TMP/blocked.json"
+  [ "$n" -ge 0 ] 2>/dev/null || { printf '%s' "$n"; return; }
+  [ "$n" -gt 12 ] && { printf '%s' "$n"; return; }
+  printf '%s' "$(printf '%s' "$ZAHL_DE" | cut -d' ' -f$((n+1)))"
 }
+
+wann() { # Zeitstempel -> "heute um 09:12" / "gestern um 14:40" / "am Mittwoch"
+  local raw="$1" ts now hm dmsg dnow dyest tage wd
+  ts="$(date -d "$raw" '+%s' 2>/dev/null)"
+  [ -z "$ts" ] && { printf 'zu unbekannter Zeit'; return; }
+  now="$(date '+%s')"
+  hm="$(date -d "@$ts" '+%H:%M')"
+  dmsg="$(date -d "@$ts" '+%Y-%m-%d')"
+  dnow="$(date '+%Y-%m-%d')"
+  dyest="$(date -d 'yesterday' '+%Y-%m-%d' 2>/dev/null)"
+  if [ "$dmsg" = "$dnow" ]; then printf 'heute um %s' "$hm"
+  elif [ "$dmsg" = "$dyest" ]; then printf 'gestern um %s' "$hm"
+  else
+    tage=$(( (now - ts) / 86400 ))
+    wd="$(printf '%s' "$WOCHENTAG_DE" | cut -d' ' -f$(( $(date -d "@$ts" '+%w') + 1 )))"
+    if [ "$tage" -le 7 ]; then printf 'am %s um %s' "$wd" "$hm"
+    else printf 'vor %s Tagen' "$tage"; fi
+  fi
+}
+
+# Markdown und Ticket-Nummern aus fremdem Text (Issue-Bodies) entfernen: der
+# Brief zitiert die Tickets, aber er soll nicht nach Ticket klingen.
+entmarkdown() {
+  sed -e 's/\*\*//g' -e 's/`//g' -e 's/\[\([^]]*\)\](\([^)]*\))/\1/g' \
+      -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//'
+}
+
+# Telefon-Breite. Ein Satz, der als eine 190 Zeichen lange Zeile ankommt, wird
+# von Telegram und vom Buzz-Client irgendwo umgebrochen — meist mitten im Wort
+# und ohne Einrückung. Deshalb bricht der Brief selbst um, am Wortende, und
+# rückt Folgezeilen ein, damit die Struktur auf dem Telefon stehen bleibt.
+BREITE="${RITUAL_WIDTH:-64}"
+falte() {
+  awk -v w="$BREITE" '{
+    match($0, /^ */); ind = substr($0, 1, RLENGTH); rest = substr($0, RLENGTH + 1)
+    if (length($0) <= w || rest == "") { print; next }
+    cont = ind "   "
+    n = split(rest, word, " ")
+    line = ind word[1]
+    for (i = 2; i <= n; i++) {
+      if (length(line) + 1 + length(word[i]) > w) { print line; line = cont word[i] }
+      else { line = line " " word[i] }
+    }
+    print line
+  }'
+}
+
+kuerzeliste() { # " a b c d" + "Text" -> "4 Projekte Text (u. a. a, b, c)"
+  local items="$1" text="$2" n joined
+  # shellcheck disable=SC2086 — die Wortaufteilung ist hier gewollt
+  set -- $(printf '%s' "$items" | tr ' ' '\n' | sed 's#^munirad7s/##' | awk 'NF')
+  n=$#
+  if [ "$n" -gt 3 ]; then
+    printf '%s %s (u. a. %s, %s, %s)' "$n" "$text" "$1" "$2" "$3"
+  else
+    joined="$(printf '%s\n' "$@" | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+    printf '%s %s (%s)' "$n" "$text" "$joined"
+  fi
+}
+
+kurz() { # $1 Text, $2 Maximallänge — schneidet an der letzten Wortgrenze
+  local s="$1" n="$2"
+  s="$(printf '%s' "$s" | entmarkdown)"
+  if [ "${#s}" -gt "$n" ]; then
+    s="${s:0:$n}"; s="${s% *}"; printf '%s …' "$s"
+  else printf '%s' "$s"; fi
+}
+
+titel_klar() { # "[GATE] Foo anlegen — Bar (5-Min-Handgriff Munir)" -> "Foo anlegen — Bar"
+  printf '%s' "$1" | sed -e 's/^\[[A-Za-z-]*\] *//' -e 's/ *([^()]*)$//' -e 's/^ *//'
+}
+
+ref_of() { # munirad7s/agency-infra + 138 -> "agency-infra 138"
+  printf '%s %s' "$(printf '%s' "$1" | sed 's#^munirad7s/##')" "$2"
+}
+
+# ------------------------------------------------------- Befunde aus den Daten
+#
+# Kopfzeile, Läuft-Block und die Zwei-Minuten-Empfehlung müssen dieselbe Lage
+# beurteilen. Deshalb wird sie EINMAL ermittelt und dann nur noch formuliert.
+
+KAPUTT=""          # eine Zeile je kaputter Sache
+KAPUTT_KURZ=""     # dieselbe Sache in Kopfzeilen-Länge
+WARTET_NAME=""; WARTET_SEIT=""; WARTET_KLASSE=""
+GELD_ALARM=""
+
+# Euro deutsch: 49.99 ist eine Maschinenzahl, 49,99 ist ein Betrag.
+euro() { printf '%s' "$1" | sed 's/\./,/'; }
+
+befunde() {
+  KAPUTT=""
+  if [ -f "$TMP/lage.json" ]; then
+    local z
+    z="$(jq -r '
+      [ (if (.server.state? // "ok") != "ok" then
+           "Auf dem Server stimmt etwas nicht: "
+           + ([ (if ((.server.kuma_down // [])|length) > 0
+                 then "die Überwachung meldet " + ((.server.kuma_down)|join(", ")) + " als ausgefallen" else empty end),
+                (if ((.server.containers_unhealthy // 0)|tonumber? // 0) > 0
+                 then ((.server.containers_unhealthy|tostring)) + " Dienste sind ungesund" else empty end),
+                (if ((.server.disk_used_pct // 0)|tonumber? // 0) >= 90
+                 then "die Festplatte ist zu " + (.server.disk_used_pct|tostring) + " Prozent voll" else empty end),
+                # agency-infra#134: ein Monitor ohne Benachrichtigung wird nie
+                # rot GEMELDET. Er kann also nur hier auffallen — sonst fällt
+                # er nie auf, und das ist der gefährlichere Zustand als "rot".
+                (if ((.server.kuma_silent // [])|length) > 0
+                 then "diese Überwachung meldet sich bei niemandem: "
+                      + ((.server.kuma_silent)|join(", ")) else empty end)
+              ] | if length == 0 then ["Genaueres steht im Lagebild"] else . end | join("; ")) + "."
+         else empty end),
+        (if (.n8n.state? // "ok") != "ok" and ((.n8n.errors_total // 0)|tonumber? // 0) > 0 then
+           "In der Automatisierung sind " + (.n8n.errors_total|tostring)
+           + " Läufe schiefgegangen"
+           + (if ((.n8n.by_workflow // [])|length) > 0
+              then ", am häufigsten " + (.n8n.by_workflow[0].workflow) else "" end) + "."
+         else empty end)
+      ] | .[]' "$TMP/lage.json" 2>/dev/null | tr -d "$CR")"
+    [ -n "$z" ] && KAPUTT="$z"
+  fi
+  if [ -f "$TMP/nest.json" ]; then
+    local nz
+    nz="$(jq -r '
+      ([.servers[]|select(.status!="ok")|.name]) as $bad |
+      [ (if ($bad|length) > 0 then "Werkzeuge fehlen den Agenten: " + ($bad|join(", ")) + "." else empty end),
+        (if .trust_accepted != "true" then "Die Agenten vertrauen ihrer eigenen Werkzeugliste nicht — sie arbeiten ohne." else empty end),
+        (if .process_drift == "ja" then "Die laufenden Agenten haben noch den alten Werkzeugkasten; ein Neustart im Desktop holt sie ab." else empty end)
+      ] | .[]' "$TMP/nest.json" 2>/dev/null | tr -d "$CR")"
+    [ -n "$nz" ] && KAPUTT="${KAPUTT:+$KAPUTT
+}$nz"
+  fi
+
+  # Die Kopfzeile darf nicht "irgendwas ist kaputt" sagen und den Leser nach
+  # unten schicken — sie muss allein tragen. Also: dieselbe erste Sache, nur
+  # kurz genug für eine Zeile.
+  KAPUTT_KURZ=""
+  [ -n "$KAPUTT" ] && KAPUTT_KURZ="$(kurz "$(printf '%s\n' "$KAPUTT" | head -1 \
+      | sed -e 's/^Auf dem Server stimmt etwas nicht: //' -e 's/\.$//' -e 's/;.*//')" 62)"
+
+  GELD_ALARM=""
+  if [ -f "$TMP/lage.json" ]; then
+    local f; f="$(jq -r '.pay.last24_failed_after_method // 0' "$TMP/lage.json" | tr -d "$CR")"
+    [ "${f:-0}" -gt 0 ] 2>/dev/null && GELD_ALARM="$f"
+  fi
+
+  WARTET_NAME=""; WARTET_SEIT=""; WARTET_KLASSE=""
+  if [ -f "$TMP/people.json" ]; then
+    local w
+    w="$(jq -r '[.people[] | select(.unread) | select(.klasse=="kunde" or .klasse=="interessent")]
+                | sort_by(if .klasse=="kunde" then 0 else 1 end, .date) | .[0]
+                | if . == null then "" else "\(.klasse)\t\(.person)\t\(.date)" end' \
+         "$TMP/people.json" 2>/dev/null | tr -d "$CR")"
+    if [ -n "$w" ]; then
+      WARTET_KLASSE="$(printf '%s' "$w" | cut -f1)"
+      WARTET_NAME="$(printf '%s' "$w" | cut -f2)"
+      WARTET_SEIT="$(wann "$(printf '%s' "$w" | cut -f3)")"
+    fi
+  fi
+}
+
+# Genau EINE Handlung. Die Reihenfolge ist die Rangfolge: ein wartender Kunde
+# schlägt jede Entscheidung, eine Geld-Entscheidung schlägt jede andere.
+zwei_minuten() {
+  if [ -n "$WARTET_NAME" ] && [ "$WARTET_KLASSE" = "kunde" ]; then
+    printf 'Antworte %s. Zwei Sätze reichen — Hauptsache, es kommt heute etwas zurück.\n' "$(kurz "$WARTET_NAME" 40)"
+    return
+  fi
+  if [ -f "$TMP/blocked.json" ] && [ "$(jq -r 'length' "$TMP/blocked.json")" -gt 0 ]; then
+    local e t r n
+    e="$(jq -r '([.[] | select(.labels|index("P1-money"))] + .) | .[0] | "\(.title)\t\(.repo)\t\(.number)"' \
+         "$TMP/blocked.json" | tr -d "$CR")"
+    t="$(titel_klar "$(printf '%s' "$e" | cut -f1)")"
+    r="$(printf '%s' "$e" | cut -f2)"; n="$(printf '%s' "$e" | cut -f3)"
+    [ "$REDACT" = "1" ] && t="‹Titel geschwärzt›"
+    printf 'Entscheide das hier: %s (%s)\n' "$(kurz "$t" 60)" "$(ref_of "$r" "$n")"
+    printf 'Antwort genügt, den Rest übernehmen wir.\n'
+    return
+  fi
+  if [ -n "$WARTET_NAME" ]; then
+    printf 'Schreib %s kurz zurück — dort wartet jemand.\n' \
+      "$([ "$REDACT" = "1" ] && printf '‹Name geschwärzt›' || kurz "$WARTET_NAME" 40)"
+    return
+  fi
+  if [ -s "$TMP/foki.txt" ] && [ "$REDACT" != "1" ]; then
+    printf 'Nichts Dringendes von außen. Nimm dir: %s\n' "$(kurz "$(head -1 "$TMP/foki.txt")" 62)"
+    return
+  fi
+  printf 'Nichts. Der Tag gehört dir.\n'
+}
+
+# --------------------------------------------------------------- Morgenbrief
 
 render_morgenbrief() {
   local out="$TMP/brief.md"
+  befunde
   {
-    printf '🌅 **MORGENBRIEF** — %s, %s (Europe/Berlin)\n' "$DATE_DE" "$CLOCK"
-    printf '\n**1) Top-3 heute** (Quelle: Vault `99 System/Now.md`)\n'
-    if [ -s "$TMP/foki.txt" ]; then
-      local i=1
-      while IFS= read -r l; do printf '   #%d %s\n' "$i" "$(trunc "$l" 110)"; i=$((i+1)); done < "$TMP/foki.txt"
+    # --- Kopfzeile: ganze Worte, keine Zahl, kein Status-Code. Wer nur diese
+    # Zeile liest, muss trotzdem wissen, woran er ist.
+    printf 'Guten Morgen. %s\n' "$DATE_DE"
+    printf '\n'
+    if [ -n "$WARTET_NAME" ] && [ "$WARTET_KLASSE" = "kunde" ]; then
+      printf 'Ein Kunde wartet auf dich, seit %s.\n' "$WARTET_SEIT"
+    elif [ -n "$KAPUTT" ]; then
+      printf 'Etwas läuft nicht: %s.\n' "$KAPUTT_KURZ"
+    elif [ -n "$GELD_ALARM" ]; then
+      printf 'Jemand wollte zahlen und kam nicht durch.\n'
+    elif [ -n "$WARTET_NAME" ]; then
+      printf 'Jemand wartet auf eine Antwort, seit %s.\n' "$WARTET_SEIT"
+    elif [ -n "$(gaps_for menschen)" ] || [ -n "$(gaps_for laeuft)" ] || [ -n "$(gaps_for geld)" ]; then
+      printf 'Ruhig, soweit ich sehen konnte — ich kam heute nicht an alles heran.\n'
+    elif [ -f "$TMP/blocked.json" ] && [ "$(jq -r 'length' "$TMP/blocked.json")" -gt 0 ]; then
+      printf 'Ruhig. Nichts brennt — heute Abend warten Entscheidungen auf dich.\n'
     else
-      printf '   ⚠️ LÜCKE — keine Foki gelesen\n'
-    fi
-    if [ -f "$TMP/lage.json" ]; then
-      local tm
-      tm="$(jq -r '.backlog.top_money // [] | .[] | "   💶 " + (.repo|sub("^munirad7s/";"")) + "#" + (.number|tostring) + " — " + (.title|.[0:80])' "$TMP/lage.json" | tr -d "$CR")"
-      [ -n "$tm" ] && { printf '   ältestes offenes P1-money (Backlog):\n'; printf '%s\n' "$tm"; }
+      printf 'Ruhig. Nichts wartet auf dich.\n'
     fi
 
-    printf '\n**2) Termine heute** (alle lesbaren Kalender, bis morgen 06:00)\n'
-    if [ -f "$TMP/cal.json" ]; then
+    # --- Geld
+    printf '\n💶 Geld\n'
+    # NUR ok/warn tragen Zahlen. Ein Block mit state "error" enthält trotzdem
+    # ein .pay-Objekt, und `// 0` würde daraus "Kein Zahlungseingang" und
+    # "kein Abo" machen — zwei zuversichtliche Falschaussagen aus einer toten
+    # Quelle. Genau das trat in der Rot-Probe auf und ist der Grund für diese
+    # Bedingung; "fehlt" allein zu prüfen reichte nicht.
+    local pst="fehlt"
+    [ -f "$TMP/lage.json" ] && pst="$(jq -r '.pay.state // "fehlt"' "$TMP/lage.json" | tr -d "$CR")"
+    if [ "$pst" != "ok" ] && [ "$pst" != "warn" ]; then
+      if [ -n "$(gaps_for geld)" ]; then gaps_satz geld | sed 's/^/   /'
+      else printf '   Ich konnte die Zahlungen heute nicht abfragen. Das heißt nicht, dass nichts kam.\n'; fi
+    else
+      jq -r --argjson redact "$REDACT" '
+        .pay as $p |
+        ( if ($p.last24_paid // 0) > 0 then
+            "   " + (if ($p.last24_paid) == 1 then "Eine Zahlung ist eingegangen"
+                     else ($p.last24_paid|tostring) + " Zahlungen sind eingegangen" end)
+            + (if $redact == 0 and $p.last24_paid_eur != null
+               then ", zusammen " + (($p.last24_paid_eur|tostring)|sub("[.]";",")) + " Euro" else "" end)
+            + (if (($p.last24_paid_methods // [])|length) > 0
+               then " (" + (($p.last24_paid_methods)|join(", ")) + ")" else "" end) + "."
+          else "   Kein Zahlungseingang in den letzten 24 Stunden." end ),
+        ( if ($p.last24_failed_after_method // 0) > 0 then
+            "   Achtung: " + (($p.last24_failed_after_method)|tostring)
+            + " Mal hat jemand die Zahlungsart schon gewählt und ist dann hängengeblieben."
+          else empty end ),
+        ( if ($p.subscriptions_active // 0) > 0 then
+            "   " + (if ($p.subscriptions_active) == 1 then "Ein Abo läuft weiter"
+                     else ($p.subscriptions_active|tostring) + " Abos laufen weiter" end)
+            + (if $redact == 0 and $p.mrr_eur != null
+               then " und bringt " + (($p.mrr_eur|tostring)|sub("[.]";",")) + " Euro im Monat" else "" end) + "."
+          else "   Es läuft aktuell kein Abo." end ),
+        ( if ($p.payments_window_complete // true) then empty
+          else "   Ich sehe nur die letzten 50 Zahlungen — ältere von gestern können fehlen." end )
+      ' "$TMP/lage.json" | tr -d "$CR"
+      gaps_satz geld | sed 's/^/   /'
+    fi
+
+    # --- Menschen
+    printf '\n✉️ Menschen\n'
+    if [ ! -f "$TMP/people.json" ]; then
+      if [ -n "$(gaps_for menschen)" ]; then gaps_satz menschen | sed 's/^/   /'
+      else printf '   Ich komme heute nicht ans Postfach — ob jemand geschrieben hat, weiß ich nicht.\n'; fi
+    else
+      local np; np="$(jq -r '.people|length' "$TMP/people.json")"
+      if [ "$np" -eq 0 ]; then
+        printf '   Niemand hat geschrieben.\n'
+      else
+        while IFS=$'\t' read -r klasse person subject date unread; do
+          [ -z "$person" ] && continue
+          local rolle=""
+          case "$klasse" in
+            kunde) rolle=" (Kunde)" ;;
+            interessent) rolle=" (Interessent)" ;;
+          esac
+          if [ "$REDACT" = "1" ]; then person="‹Name geschwärzt›"; subject="‹Betreff geschwärzt›"; fi
+          printf '   %s%s hat %s geschrieben.\n' "$(kurz "$person" 34)" "$rolle" "$(wann "$date")"
+          printf '      Betreff: %s%s\n' "$(kurz "$subject" 46)" \
+            "$([ "$unread" = "true" ] && printf ' — wartet noch auf Antwort')"
+        # Kein Feld darf leer sein: `read` mit IFS=TAB behandelt den Tabulator
+        # als Whitespace und schluckt führende Leerfelder — dann rutscht die
+        # ganze Zeile um eine Spalte und der Betreff steht als Absender im
+        # Brief. Genau das ist beim Bau passiert. Also überall ein Platzhalter.
+        #
+        # Kunden und Interessenten stehen VOLLSTÄNDIG da; vom Rest nur die
+        # ältesten drei, damit ein Dienstleister-Postfach keinen wartenden
+        # Kunden aus dem Blick schiebt. Was übrig bleibt, wird gezählt.
+        done < <(jq -r --argjson restcap "$REST_CAP" '
+                        ([.people[] | select(.klasse=="kunde" or .klasse=="interessent")]
+                         + ([.people[] | select(.klasse!="kunde" and .klasse!="interessent")][0:$restcap]))[] |
+                        [ (if (.klasse // "") == "" then "rest" else .klasse end),
+                          (if (.person // "") == "" then "Unbekannt" else .person end),
+                          (if (.subject // "") == "" then "(ohne Betreff)" else .subject end),
+                          (if (.date // "") == "" then "-" else .date end),
+                          (.unread|tostring) ] | @tsv' \
+                 "$TMP/people.json" | tr -d "$CR")
+      fi
+      local nrest nm
+      nrest="$(jq -r --argjson c "$REST_CAP" \
+        '([.people[] | select(.klasse!="kunde" and .klasse!="interessent")]|length) - $c
+         | if . < 0 then 0 else . end' "$TMP/people.json")"
+      [ "${nrest:-0}" -gt 0 ] 2>/dev/null && \
+        printf '   Dazu %s weitere Absender, keiner davon Kunde oder Interessent.\n' "$nrest"
+      nm="$(jq -r '.machines' "$TMP/people.json")"
+      [ "${nm:-0}" -gt 0 ] 2>/dev/null && \
+        printf '   Und %s automatische Benachrichtigungen — die habe ich weggelassen.\n' "$nm"
+      gaps_satz menschen | sed 's/^/   /'
+    fi
+
+    # --- Dein Tag
+    printf '\n📅 Dein Tag\n'
+    if [ ! -f "$TMP/cal.json" ]; then
+      if [ -n "$(gaps_for tag)" ]; then gaps_satz tag | sed 's/^/   /'
+      else printf '   Deinen Kalender habe ich nicht erreicht — plane nicht mit einem freien Tag.\n'; fi
+    else
       local nev; nev="$(jq -r '.events|length' "$TMP/cal.json")"
       if [ "$nev" -eq 0 ]; then
         if [ "$(jq -r '.unreadable|length' "$TMP/cal.json")" -gt 0 ]; then
-          printf '   ⚠️ 0 in den LESBAREN Kalendern — nicht alle waren lesbar (siehe Block 6)\n'
+          printf '   In den Kalendern, die ich lesen konnte, steht nichts — aber nicht alle waren lesbar.\n'
         else
-          printf '   keine Termine im Fenster\n'
+          printf '   Keine Termine. Der Tag gehört dir.\n'
         fi
       else
-        printf '   %s Termine:\n' "$nev"
-        # Ganztägige zuerst: Klausuren, Fristen und Urlaube stehen dort, und ein
-        # "ganztägig" ohne Uhrzeit sähe sonst wie 00:00 aus.
-        jq -r '
+        # Termine sind Privatsache: unter --redact (öffentlicher Beleg) bleibt
+        # die Uhrzeit stehen, der Inhalt nicht.
+        jq -r --arg heute "$(date '+%Y-%m-%d')" --argjson redact "$REDACT" '
+          def was($s): if $redact == 1 then "‹Termin geschwärzt›" else ($s|.[0:44]) end;
           [.events[]|select(.allDay)] as $a |
           [.events[]|select(.allDay|not)] as $t |
-          ([$a[]| "   ▪ ganztägig — " + (.summary|.[0:70]) + " (" + (.calendar|.[0:22]) + ")"]
-           + [$t[]| "   ▪ " + (.start|.[11:16]) + " — " + (.summary|.[0:70])
-                    + (if .location then " @" + (.location|.[0:28]) else "" end)])[0:12] | .[]
+          ([ $a[] | "   Den ganzen Tag: " + was(.summary) + "." ]
+           + [ $t[] | (if (.start|.[0:10]) == $heute then "   Um " else "   Morgen um " end)
+                      + (.start|.[11:16]) + " " + was(.summary)
+                      + (if .location and $redact == 0 then " (" + (.location|.[0:22]) + ")" else "" end) + "." ])[0:6] | .[]
         ' "$TMP/cal.json" | tr -d "$CR"
-        [ "$nev" -gt 12 ] && printf '   … und %s weitere\n' "$((nev-12))"
+        [ "$nev" -gt 6 ] && printf '   Danach stehen noch %s weitere Einträge im Kalender.\n' "$((nev-6))"
       fi
-    else
-      printf '   ⚠️ LÜCKE — Kalender nicht erhoben (siehe Block 6)\n'
+      gaps_satz tag | sed 's/^/   /'
     fi
 
-    printf '\n**3) Inbox** (m.muniradas@gmail.com, letzte 24 h)\n'
-    if [ -f "$TMP/inbox.json" ]; then
-      local total unread mark=""
-      total="$(jq -r '.messages|length' "$TMP/inbox.json")"
-      unread="$(jq -r '[.messages[]|select(.labelIds|index("UNREAD"))]|length' "$TMP/inbox.json")"
-      [ -f "$TMP/inbox.capped" ] && mark="≥"
-      printf '   %s%s neue Nachrichten, davon %s%s ungelesen%s\n' "$mark" "$total" "$mark" "$unread" \
-        "$([ -n "$mark" ] && printf ' (Abfrage-Limit erreicht — Untergrenze)')"
-      if [ "$REDACT" = "1" ]; then
-        printf '   (Absender/Betreffe geschwärzt — öffentlicher Kontext)\n'
-      else
-        jq -r '[.messages[]|select(.labelIds|index("UNREAD"))] | .[0:6][] |
-               "   • " + ((.from|sub(" *<.*>$";""))|.[0:32]) + " — " + (.subject//"(ohne Betreff)"|.[0:70])' \
-          "$TMP/inbox.json" | tr -d "$CR"
-        [ "$unread" -gt 6 ] && printf '   …und %s weitere ungelesene\n' "$((unread-6))"
-      fi
+    # --- Läuft (nur wenn etwas kaputt ist)
+    printf '\n⚙️ Läuft\n'
+    if [ -n "$KAPUTT" ]; then
+      printf '%s\n' "$KAPUTT" | sed 's/^/   /'
+    elif [ -n "$(gaps_for laeuft)" ]; then
+      printf '   Ich konnte die Technik nicht vollständig prüfen:\n'
     else
-      printf '   ⚠️ LÜCKE — Inbox nicht erhoben (siehe Block 6)\n'
+      printf '   Alles läuft. Nichts kaputt.\n'
     fi
+    gaps_satz laeuft | sed 's/^/   /'
 
-    printf '\n**4) Lage** (Quelle: `.empire/tools/lagebild.sh`)\n'
-    if [ -f "$TMP/lage.json" ]; then
-      jq -r '
-        def st(x): if x == "ok" then "" elif x == "warn" then " ⚠️" else " ❌" end;
-        [ (if .backlog then "   Backlog:" + st(.backlog.state) + " " + (.backlog.ready_total|tostring) + " ready ("
-             + ((.backlog.by_prio."P1-money")|tostring) + "× P1-money, ohne blockierte) · "
-             + (.backlog.in_progress|tostring) + " in-progress"
-           else "   Backlog: ❌ nicht erhoben" end),
-          (if (.n8n.state? // "") != "" then "   n8n:" + st(.n8n.state) + " "
-             + ((.n8n.errors_total // "?")|tostring) + " Fehler / "
-             + ((.n8n.executions_in_window // "?")|tostring) + " Executions (24 h)"
-             + (if (.n8n.by_workflow // []) | length > 0
-                then " — häufigster: " + (.n8n.by_workflow[0].workflow) else "" end) else empty end),
-          (if (.server.state? // "") != "" then "   Server:" + st(.server.state) + " "
-             + ((.server.disk_used_pct // "?")|tostring) + "% Disk · "
-             + ((.server.containers_running // "?")|tostring) + " Container up · "
-             + ((.server.containers_unhealthy // "?")|tostring) + " unhealthy"
-             + (if ((.server.kuma_down // []) | length) > 0
-                then " · Kuma rot: " + ((.server.kuma_down)|join(", ")) else "" end)
-             # agency-infra#134: ein Monitor ohne Benachrichtigung wird nie rot
-             # gemeldet — er muss deshalb HIER auffallen, sonst fällt er nie auf.
-             + (if ((.server.kuma_silent // []) | length) > 0
-                then " · Kuma STUMM (alarmiert niemanden): " + ((.server.kuma_silent)|join(", ")) else "" end) else empty end),
-          (if (.pay.state? // "") != "" then "   Zahlungen:" + st(.pay.state) + " "
-             + ((.pay.subscriptions_active // "?")|tostring) + " aktive Abos · 30 T: "
-             + ((.pay.last30_by_status.paid // 0)|tostring) + " bezahlt / "
-             + ((.pay.last30_total // "?")|tostring) + " Versuche ("
-             + ((.pay.last30_failed_after_method // 0)|tostring) + " nach Methodenwahl gescheitert)" else empty end)
-        ] | .[]' "$TMP/lage.json" | tr -d "$CR"
-    else
-      printf '   ⚠️ LÜCKE — Lagebild nicht erhoben (siehe Block 6)\n'
-    fi
-    if [ -f "$TMP/nest.json" ]; then
-      jq -r '
-        (.servers|length) as $n |
-        ([.servers[]|select(.status=="ok")]|length) as $ok |
-        ([.servers[]|select(.status!="ok")|.name + " (" + .status + ")"]) as $bad |
-        "   Werkzeuge:" + (if .exit == 0 then "" else " ❌" end)
-        + " " + ($ok|tostring) + "/" + ($n|tostring) + " MCP-Server einsatzbereit"
-        + (if ($bad|length) > 0 then " — rot: " + ($bad|join(", ")) else "" end)
-        + (if .trust_accepted != "true" then " · Nest NICHT getraut — .mcp.json wird ignoriert" else "" end)
-        + (if .process_drift == "ja" then " · Agenten laufen mit ALTEM Werkzeugkasten (Neustart im Desktop nötig)" else "" end)
-      ' "$TMP/nest.json" | tr -d "$CR"
-    else
-      printf '   Werkzeuge: ⚠️ LÜCKE — Nest-Doctor nicht erhoben (siehe Block 6)\n'
-    fi
-
-    printf '\n**5) Deine Entscheidungen** (offene `blocked-munir`)\n'
-    if [ -f "$TMP/blocked.json" ]; then
-      local nb; nb="$(jq -r 'length' "$TMP/blocked.json")"
-      if [ "$nb" -eq 0 ]; then
-        if grep -q 'nicht lesbar\|am Limit\|lieferte nichts' "$GAPFILE" 2>/dev/null; then
-          printf '   ⚠️ 0 in den lesbaren Repos — nicht alle waren lesbar (siehe Block 6)\n'
-        else
-          printf '   keine offenen Blocker\n'
-        fi
-      else
-        printf '   %s offen — Top 3:\n' "$nb"
-        render_gate_lines 3 | sed 's/^/   /'
-        printf '   voller Batch heute 20:45\n'
-      fi
-    else
-      printf '   ⚠️ LÜCKE — blocked-munir nicht erhoben (siehe Block 6)\n'
-    fi
-
-    printf '\n**6) Lücken** (bewusst benannt, nie als 0 verbucht)\n'
-    if [ -s "$GAPFILE" ]; then
-      sed 's/^/   • /' "$GAPFILE"
-    else
-      printf '   • sonst keine — alle Quellen haben geliefert\n'
-    fi
-  } > "$out"
+    # --- Wenn du zwei Minuten hast
+    printf '\n⏱️ Wenn du zwei Minuten hast\n'
+    zwei_minuten | sed 's/^/   /'
+  } | falte > "$out"
   printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------- Gate-Batch
+
+# Die Folgen eines Ja und eines Nein werden dem Ticket ENTNOMMEN, nie erfunden:
+# "Ja" ist die Mission des Tickets (der Zustand, den es herstellt), "Nein" ist
+# der Satz aus dem Money-Link, der mit "Ohne" beginnt (der Preis des Nichtstuns).
+# Fehlt einer der beiden, steht dort ein ehrlicher Platzhalter — kein erfundener
+# Nutzen und kein erfundener Schaden.
+render_gate_lines() { # $1 = Anzahl — nummeriert, damit "1 ja, 2 nein" funktioniert
+  local n="$1"
+  jq -r --argjson n "$n" --argjson redact "$REDACT" '
+    def clean: gsub("\\*\\*";"") | gsub("`";"") | gsub("\\[(?<t>[^]]*)\\]\\([^)]*\\)";"\(.t)")
+               | gsub("\\s+";" ") | gsub("^ +| +$";"");
+    def section($h):
+      ("\n" + ((.body // "") | gsub("\r";"")))
+      | split("\n## ") | map(select(startswith($h))) | (.[0] // "")
+      | split("\n") | .[1:] | map(select(test("\\S"))) | (.[0] // "") | clean;
+    def satz1: . as $t
+      | ([ $t | match("[.!?](\\s|$)"; "g").offset ] | map(select(. >= 25)) | .[0]) as $i
+      | (if $i == null then $t else $t[0:$i+1] end);
+    def schnitt($n): if (.|length) > $n then (.[0:$n] | sub(" [^ ]*$";"")) + " …" else . end;
+    # Klammer-Einschuebe raus, BEVOR gekuerzt wird: sie kosten die Haelfte der
+    # Zeile und tragen fuer die Entscheidung nichts bei. Erst danach schneiden —
+    # sonst endet jeder zweite Satz mitten in einer technischen Aufzaehlung.
+    def entklammert: gsub("\\s*\\([^()]*\\)";"") | gsub("\\s+";" ") | gsub("^ +| +$";"");
+    def titel: (.title | sub("^\\[[A-Za-z-]*\\] *";"") | sub(" *\\([^()]*\\)$";"")) | clean;
+    .[0:$n] | to_entries[] |
+    (.value.repo | sub("^munirad7s/";"")) as $repo |
+    (.value | section("Mission") | satz1 | entklammert | schnitt(150)) as $ja |
+    (.value | section("Money-Link") | split(". ")
+      | map(select(test("^([Oo]hne |Solange |Bis dahin )"))) | (.[0] // "") | clean | entklammert | schnitt(150)) as $nein |
+    "\(.key+1)) " + (if $redact == 1 then "‹Titel geschwärzt›" else (.value | titel | schnitt(58)) end),
+    "   (\($repo) \(.value.number))",
+    "   Sagst du ja: " + (if $redact == 1 then "‹geschwärzt›"
+                          elif ($ja|length) > 0 then $ja
+                          else "das Vorhaben läuft weiter — was genau dabei herauskommt, steht im Ticket." end),
+    "   Sagst du nein oder gar nichts: " + (if $redact == 1 then "‹geschwärzt›"
+                          elif ($nein|length) > 0 then ($nein | if test("[.!?…]$") then . else . + "." end)
+                          else "es bleibt genau so liegen wie jetzt, und die Frage kommt morgen wieder." end),
+    ""
+  ' "$TMP/blocked.json"
 }
 
 # CRM-Löschzeile — buzz#79. Schwelle NICHT geraten, sondern aus 8 Tagen
@@ -619,17 +1030,12 @@ render_morgenbrief() {
 plural_del() { [ "$1" -eq 1 ] && printf 'Löschung' || printf 'Löschungen'; }
 
 render_crm_deletions() {
-  local win="${RITUAL_CRM_WINDOW_H:-24}" off="${RITUAL_CRM_OFFSET_H:-0}"
-  if [ "$off" -gt 0 ]; then
-    printf '\n**CRM-Löschungen** (%s h, endend vor %s h · Quelle: Espo-Aktionshistorie, read-only über die DB)\n' "$win" "$off"
-  else
-    printf '\n**CRM-Löschungen** (letzte %s h · Quelle: Espo-Aktionshistorie, read-only über die DB)\n' "$win"
-  fi
+  local win="${RITUAL_CRM_WINDOW_H:-24}"
   if [ ! -f "$TMP/crm.raw" ]; then
-    printf '   ⚠️ LÜCKE — die Löschspur wurde NICHT erhoben. Das ist kein "0 Löschungen". Siehe Lücken.\n'
+    printf '   Ob im CRM etwas gelöscht wurde, konnte ich heute nicht prüfen. Das heißt nicht, dass nichts gelöscht wurde.\n'
     return
   fi
-  local total probe rest last
+  local total probe rest last comp
   total="$(awk -F'|' '/^crm_row=/{s+=$3} END{print s+0}' "$TMP/crm.raw")"
   probe="$(awk -F'|' '/^crm_row=/{u=$1; sub(/^crm_row=/,"",u);
              if (u=="n8n-agent" && ($2=="Lead" || $2=="CTouchpoint")) s += ($3>1 ? 1 : $3)}
@@ -637,59 +1043,108 @@ render_crm_deletions() {
   rest=$((total - probe))
   last="$(grep -m1 '^crm_last=' "$TMP/crm.raw" | cut -d= -f2-)"
 
+  # Jede Aussage ist EINE logische Zeile — den Umbruch macht `falte`, sonst
+  # bricht erst das printf und dann nochmal der Falter, und der Satz zerfällt.
   if [ "$total" -eq 0 ]; then
-    printf '   ⚠️ 0 Löschungen — auch der Funnel-Probe hat nichts gelöscht.\n'
-    printf '      Erwartet wären 1× Lead + 1× CTouchpoint (n8n-agent). Prüfen, ob `[BUZZ-53] funnel-probe` noch läuft.\n'
-    printf '      Letzte Löschung überhaupt: %s (UTC)\n' "${last:--}"
+    # 0 ist hier KEIN Ruhezustand: die tägliche Funnel-Probe löscht ihre eigenen
+    # Testdaten wieder. Löscht sie nichts, dann lief sie nicht.
+    printf '   Im CRM wurde nichts gelöscht — auch die tägliche Testbuchung nicht. Die räumt sonst immer hinter sich auf, also läuft sie vermutlich nicht mehr. Letzte Löschung überhaupt: %s.\n' "${last:--}"
   elif [ "$rest" -eq 0 ]; then
-    # Die Zusammensetzung wird GEMESSEN, nicht behauptet. Eine feste Formel
-    # ("1× Lead + 1× CTouchpoint") wäre bei 1 gelöschtem Lead eine erfundene
-    # Zahl im Führungsbrief — gemessen am 01.08. genau so passiert.
-    local comp
     comp="$(awk -F'|' '/^crm_row=/{ c = c (c=="" ? "" : ", ") $3 "× " $2 } END{print c}' "$TMP/crm.raw")"
-    printf '   ✅ %s %s — ausschließlich der Funnel-Probe (n8n-agent): %s. Erwartet.\n' \
-      "$total" "$(plural_del "$total")" "$comp"
+    printf '   Im CRM hat in %s Stunden nur die tägliche Testbuchung gelöscht (%s). So soll es sein.\n' "$win" "$comp"
   else
-    printf '   ⚠️ %s %s, davon **%s außerhalb des Funnel-Probes** — erklärungsbedürftig:\n' \
-      "$total" "$(plural_del "$total")" "$rest"
-    awk -F'|' '/^crm_row=/{
-          u=$1; sub(/^crm_row=/,"",u);
-          a[u] = a[u] (a[u]=="" ? "" : ", ") $3 "× " $2;
-          t[u] += $3 }
-        END{ for (u in t) printf "%d\t      – %s: %s\n", t[u], u, a[u] }' "$TMP/crm.raw" \
-      | sort -rn | cut -f2-
-    [ "$probe" -eq 0 ] && printf '      – Funnel-Probe (n8n-agent): NICHT gelaufen — zusätzlich prüfen.\n'
-    printf '      Erwartungswert ist 1× Lead + 1× CTouchpoint durch n8n-agent; alles andere braucht eine Erklärung.\n'
+    printf '   Achtung: im CRM wurde %s Mal gelöscht, davon %s Mal nicht von der täglichen Testbuchung. Das gehört angeschaut:\n' "$total" "$rest"
+    if [ "$REDACT" = "1" ]; then
+      printf '      (wer genau, ist hier geschwärzt)\n'
+    else
+      awk -F'|' '/^crm_row=/{
+            u=$1; sub(/^crm_row=/,"",u);
+            a[u] = a[u] (a[u]=="" ? "" : ", ") $3 "× " $2;
+            t[u] += $3 }
+          END{ for (u in t) printf "%d\t      %s: %s\n", t[u], u, a[u] }' "$TMP/crm.raw" \
+        | sort -rn | cut -f2- | head -3
+    fi
+    [ "$probe" -eq 0 ] && printf '      Die tägliche Testbuchung lief dabei gar nicht.\n'
   fi
 }
 
 render_gate_batch() {
   local out="$TMP/brief.md"
   local nb=0; [ -f "$TMP/blocked.json" ] && nb="$(jq -r 'length' "$TMP/blocked.json")"
+  local zeige="$nb"; [ "$zeige" -gt "$BRIEF_LIMIT" ] && zeige="$BRIEF_LIMIT"
   {
-    printf '🔐 **GATE-BATCH** — %s, %s (Europe/Berlin)\n' "$DATE_DE" "$CLOCK"
+    printf 'Guten Abend. %s\n\n' "$DATE_DE"
     if [ ! -f "$TMP/blocked.json" ]; then
-      printf '\n❌ KEINE DATENBASIS — die blocked-munir-Liste konnte nicht erhoben werden.\n'
-      printf 'Das ist KEIN "heute nichts zu tun". Siehe Lücken.\n'
+      printf 'Ich konnte heute nicht nachsehen, was auf dich wartet.\n'
+      printf 'Das heißt ausdrücklich nicht, dass nichts wartet.\n'
+      gaps_satz entscheidungen | sed 's/^/   /'
     elif [ "$nb" -eq 0 ]; then
-      if grep -q 'nicht lesbar\|am Limit\|lieferte nichts' "$GAPFILE" 2>/dev/null; then
-        printf '\n⚠️ 0 Blocker in den LESBAREN Repos — aber nicht alle Repos waren lesbar.\n'
-        printf 'Das ist KEIN "heute kein Munir-Gate". Siehe Lücken.\n'
+      if [ -n "$(gaps_for entscheidungen)" ]; then
+        printf 'In dem, was ich lesen konnte, wartet nichts — aber ich konnte nicht alles lesen.\n'
+        gaps_satz entscheidungen | sed 's/^/   /'
       else
-        printf '\nHeute kein Munir-Gate — 0 offene `blocked-munir` über %s Repos.\n' "$(repo_list | wc -l | tr -d ' ')"
+        printf 'Heute nichts zu entscheiden. Nichts wartet auf dich.\n'
       fi
     else
-      printf '\n**%s Entscheidungen offen.** Reihenfolge: P1-money → P1 → P2 → P3, je Gruppe ältestes zuerst.\n\n' "$nb"
-      render_gate_lines "$BRIEF_LIMIT"
-      if [ "$nb" -gt "$BRIEF_LIMIT" ]; then
-        printf '\n…und %s weitere: https://github.com/issues?q=is%%3Aopen+label%%3Ablocked-munir+user%%3Amunirad7s\n' "$((nb-BRIEF_LIMIT))"
+      # Kopfzeile: wie viele Entscheidungen und wie lange das dauert.
+      local minuten=$(( (zeige + 1) / 2 )); [ "$minuten" -lt 1 ] && minuten=1
+      printf '%s %s, etwa %s %s.\n' \
+        "$(zahlwort "$zeige" | sed 's/^./\U&/')" \
+        "$([ "$zeige" -eq 1 ] && printf 'Entscheidung' || printf 'Entscheidungen')" \
+        "$(zahlwort "$minuten")" \
+        "$([ "$minuten" -eq 1 ] && printf 'Minute' || printf 'Minuten')"
+      printf 'Antworte einfach mit den Nummern, zum Beispiel "1 ja, 2 nein".\n\n'
+      # Eine Kopfzeile, die sechs Entscheidungen ankündigt, gefolgt von nichts,
+      # ist die stillste aller stillen Nullen — sie sieht aus wie ein leerer
+      # Abend. Gemessen beim Bau: ein jq-Compilefehler tat genau das. Deshalb
+      # wird das Ergebnis erst geprüft und dann gedruckt.
+      local zeilen; zeilen="$(render_gate_lines "$zeige" | tr -d "$CR")"
+      if [ -z "$zeilen" ]; then
+        printf 'Ich konnte die Entscheidungen nicht aufbereiten — sie sind da,\n'
+        printf 'aber ich kann sie dir heute nicht vorlegen. Bitte im Backlog\n'
+        printf 'nach der Markierung blocked-munir schauen.\n\n'
+        gap "entscheidungen" "Die Entscheidungen ließen sich nicht in Textform bringen (Render-Fehler)"
+      else
+        printf '%s\n\n' "$zeilen"
       fi
-      printf '\nJede Zeile ist eine Entscheidung, die nur du treffen kannst. Erledigt = Label `blocked-munir` entfernen.\n'
+      if [ "$nb" -gt "$zeige" ]; then
+        printf 'Es warten noch %s weitere, die heute nicht dringend sind.\n' "$((nb-zeige))"
+      fi
+      gaps_satz entscheidungen | sed 's/^/   /'
     fi
+
+    # Was heute gelaufen ist — höchstens fünf Zeilen, dann Schluss.
+    printf '\nWas heute gelaufen ist\n'
+    if [ ! -f "$TMP/closed.json" ]; then
+      if [ -n "$(gaps_for sonst)" ]; then gaps_satz sonst | head -2 | sed 's/^/   /'
+      else printf '   Konnte ich heute nicht zusammenzählen.\n'; fi
+    else
+      local ct; ct="$(jq -r 'length' "$TMP/closed.json")"
+      if [ "$ct" -eq 0 ]; then
+        printf '   Heute wurde nichts fertig.\n'
+      else
+        local top
+        top="$(jq -r --argjson redact "$REDACT" '
+          group_by(.repo) | sort_by(-length) | .[0:3][] |
+          "   " + (.[0].repo|sub("^munirad7s/";"")) + ": "
+          + (if $redact == 1 then "‹geschwärzt›"
+             else (.[0].title | sub("^\\[[^]]*\\] *";"") | sub("^P[0-9](-money)?: *";"")
+                   | if length > 40 then (.[0:40] | sub(" [^ ]*$";"")) else . end) end)
+          + (if length > 1 then " und " + ((length-1)|tostring) + " weitere" else "" end)' \
+          "$TMP/closed.json" | tr -d "$CR")"
+        printf '   %s %s fertig geworden, in %s Projekten:\n' \
+          "$(zahlwort "$ct" | sed 's/^./\U&/')" \
+          "$([ "$ct" -eq 1 ] && printf 'Aufgabe ist' || printf 'Aufgaben sind')" \
+          "$(jq -r '[.[].repo]|unique|length' "$TMP/closed.json")"
+        if [ -n "$top" ]; then printf '%s\n' "$top"
+        else printf '   Welche genau, konnte ich nicht auflisten.\n'; fi
+      fi
+    fi
+    # Löschungen im CRM (buzz#79) gehören zum Tagesabschluss: sie sind das
+    # Einzige aus dem Kundenbestand, das über Nacht unbemerkt verschwinden
+    # kann. 0 ist hier kein Ruhezustand — siehe render_crm_deletions.
     render_crm_deletions
-    printf '\n**Lücken**\n'
-    if [ -s "$GAPFILE" ]; then sed 's/^/   • /' "$GAPFILE"; else printf '   • keine — alle Repos gelesen\n'; fi
-  } > "$out"
+  } | falte > "$out"
   printf '%s' "$out"
 }
 
@@ -796,7 +1251,7 @@ render_wochen_review() {
     fi
 
     printf '\n**5) Lücken**\n'
-    if [ -s "$GAPFILE" ]; then sed 's/^/   • /' "$GAPFILE"; else printf '   • keine — alle Quellen haben geliefert\n'; fi
+    if [ -s "$GAPFILE" ]; then gaps_flat | sed 's/^/   • /'; else printf '   • keine — alle Quellen haben geliefert\n'; fi
   } > "$out"
   printf '%s' "$out"
 }
@@ -893,16 +1348,20 @@ append_vault() {
 case "$MODE" in
   morgenbrief)
     collect_foki
-    collect_lagebild "backlog,n8n,server,pay"
+    # --amounts: der Geld-Block soll sagen, WIE VIEL sich bewegt hat. Der Brief
+    # geht in Munirs privaten Kanal; fuer oeffentliche Belege schwaerzt --redact.
+    collect_lagebild "backlog,n8n,server,pay" "$([ "$REDACT" = "1" ] || printf -- '--amounts')"
     collect_nest
     collect_calendar
-    collect_inbox
+    collect_people
     collect_blocked
     BRIEF="$(render_morgenbrief)"
     CH="${BUZZ_CHANNEL:-$CH_GENERAL}"; LABEL="🌅 Morgenbrief"
     ;;
   gate-batch)
     collect_blocked
+    # „Was heute gelaufen ist" ist der Abschluss des Tages, nicht der Woche.
+    collect_closed "$(date '+%Y-%m-%d')"
     collect_crm_deletions || true
     BRIEF="$(render_gate_batch)"
     CH="${BUZZ_CHANNEL:-$CH_GATES}"; LABEL="🔐 Gate-Batch"

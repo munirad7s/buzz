@@ -1715,3 +1715,57 @@ Das gehört genauso ins Protokoll wie die Funde — jeder davon hätte ein plaus
 - **`gh run list` ist blind für Repos ohne Workflows.** Ein leeres Ergebnis heißt „kein CI", nicht „CI kaputt". Die Gegenprobe ist `GET /repos/{o}/{r}/actions/workflows` plus `total_count` der Runs.
 - **Ein in der Workflow-YAML referenzierter Name beweist nicht, dass der Wert gesetzt ist** — `GET /repos/{o}/{r}/actions/secrets` beweist es. Skripte, die ohne den Wert still zum No-op werden (`[ -n "${TOKEN:-}" ] || return 0`), sind sonst grün und wirkungslos.
 - **Der Berichts-Vorbehalt:** Dass eine Zahl irgendwo im Morgenbrief auftaucht, macht sie nicht zu einem Wächter. `lagebild.sh` hätte einen fehlgeschlagenen Einzug als Zähler gezeigt — ohne Kunde, ohne Aktion, ohne Alarm. Beim Bewerten eines Fundes gehört diese Teil-Mitigation benannt, aber sie entkräftet ihn nicht.
+
+## Die Briefe lesen sich wie Briefe (buzz#106 — Morgenbrief + Gate-Batch)
+
+Munirs Befund, wörtlich: „der Struktur von Morgenbrief und so weiter ist nicht so schön, muss für mich übersichtlicher, mit schön menschlich beschrieben, gute Struktur." Der Leser ist einer, er liest um 08:45 auf dem Telefon, mit Neugeborenem und Drittversuch-Klausuren, und er hat zwei Minuten. Ein Brief, der wie ein Systemreport aussieht, wird nicht gelesen — und ein nicht gelesener Brief macht die gesamte Erhebungsmaschinerie (#7, #10, #59, #62, #63) wertlos.
+
+**Morgenbrief — feste Reihenfolge, keine nummerierten Blöcke mehr:** Kopfzeile in ganzen Worten (beurteilt den Tag, ohne Zahl und ohne Status-Code) · 💶 Geld · ✉️ Menschen · 📅 Dein Tag · ⚙️ Läuft · ⏱️ Wenn du zwei Minuten hast.
+
+**Gate-Batch:** Kopfzeile mit Anzahl UND Zeitbedarf („Sechs Entscheidungen, etwa drei Minuten.") · nummerierte Entscheidungen, je drei Zeilen (worum es geht · was ein Ja bewirkt · was ein Nein oder Schweigen bewirkt) · dann höchstens fünf Zeilen „was heute gelaufen ist" · Schluss.
+
+### Was daran mehr ist als Kosmetik
+
+- **Reiner Text, selbst umgebrochen bei 64 Zeichen** (`falte`, `RITUAL_WIDTH`). Kein Markdown, keine Tabellen, keine Codeblöcke: Was auf dem Telefon zerfallen kann, kommt nicht vor. Die Telegram-Markup-Strippe in `post_telegram` ist damit ein No-Op statt einer Rettung.
+- **Die Folgen im Gate-Batch werden dem Ticket ENTNOMMEN, nie erfunden.** „Sagst du ja" ist der erste Satz aus `## Mission`, „Sagst du nein oder gar nichts" der Satz aus `## Money-Link`, der mit „Ohne"/„Solange"/„Bis dahin" beginnt. Fehlt er, steht dort ein ehrlicher Platzhalter („es bleibt genau so liegen wie jetzt") — kein erfundener Schaden. Gemessen am 01.08.: 4 von 6 Entscheidungen trugen ihren echten Preis, 2 fielen sichtbar auf den Platzhalter zurück. **Das ist der Grund, warum `## Money-Link` einen „Ohne …"-Satz enthalten sollte: er landet wörtlich in Munirs Abendbatch.**
+- **Lücken stehen im betroffenen Abschnitt, nicht in einem Sammelblock am Ende.** `gap()` trägt jetzt Zielabschnitte (`geld menschen tag laeuft entscheidungen sonst`). Eine Lücke im Sammelblock liest niemand; eine Lücke unter „Geld" ersetzt die Zahl, die dort sonst stünde.
+- **Der Gate-Batch zeigt sechs statt zwölf Entscheidungen** (`RITUAL_GATE_LINES`). Zwölf sind auf dem Telefon eine Wand; die Sortierung P1-money-zuerst sorgt dafür, dass die sechs teuersten oben stehen, der Rest wird gezählt statt verschwiegen.
+
+### Der Fund, der den Inbox-Block ersetzt hat (gemessen 01.08.)
+
+Die alte Zeile lautete „≥50 neue Nachrichten, davon ≥43 ungelesen". Eine Stichprobe über die **50 neuesten Nachrichten der letzten fünf Tage** ergab: **ausnahmslos Maschinen** — GitHub-CI, das eigene Monitoring, Revolut, Werbung. Kein einziger Mensch. Zwei Konsequenzen:
+
+1. Die Zahl maß reines CI-Rauschen und sah dabei aus wie eine Aussage über Kunden.
+2. `gmail_search` deckelt hart bei 50 (zod-Schema). Eine echte Kundenmail wäre **hinter dem Deckel unsichtbar** geblieben — der gefährlichere Teil.
+
+Deshalb: **Der Ausschluss gehört in die Abfrage, nicht hinter sie.** Der Menschen-Block fragt `in:inbox newer_than:7d` mit serverseitigem `-from:`/`-category:`-Ausschluss und filtert danach nochmals lokal (`MACHINE_RE`, `OWN_DOMAINS`). Zwei Netze, weil Gmails `from:`-Matching unscharf ist. Wirkung im selben Postfach: aus 50 Maschinen wurden 3 namentlich genannte Menschen + 5 weitere Absender + 29 gezählte Benachrichtigungen.
+
+Der größte Rauschposten war nicht GitHub, sondern **Munirs eigene Systeme**, die ihm in sein eigenes Postfach schreiben (`mondsamt@`, `autopilot@`, `foerderwerk@`, `kontakt@` auf `adas.team`/`adasgroup.de`). Ein Kunde schreibt nicht von adas.team.
+
+**Bewusst in Kauf genommen:** schriebe ein echter Kunde von `support@seinefirma.de`, landete er in der Benachrichtigungszählung. Deshalb steht die Zahl der Aussortierten IM Brief — sichtbar falsch ist besser als unsichtbar weg.
+
+**Einordnung zahlend/interessiert:** Vault-Kundenordner (`04 Areas/clients/<kunde>/`, Zusagen-Kanon) schlägt CRM (Espo `espo_search` auf Contact/Lead, Pipeline-Wahrheit). Antwortet das CRM nicht, ist das eine benannte Lücke — nie „kein Kunde".
+
+### Fallen, die beim Bau zugeschnappt sind (alle gemessen, alle abgeräumt)
+
+- **`read` mit `IFS=$'\t'` schluckt führende Leerfelder.** Der Tabulator ist ein IFS-*Whitespace*-Zeichen; ein leeres erstes Feld verschwindet und die ganze Zeile rutscht eine Spalte. Im Brief stand daraufhin der Betreff als Absendername. Regel: bei `@tsv` + `read` darf **kein** Feld leer sein — jq setzt Platzhalter.
+- **`jq -n` schreibt mehrzeiliges JSON, und mehrzeiliges JSON überlebt die MSYS-argv-Konvertierung nicht.** `mcp-call.mjs` bekam `--args` und meldete „ist kein JSON". Regel: JSON-Argumente für `mcp-call.mjs` immer `jq -cn`.
+- **`state: "error"` ist NICHT `state: "fehlt"`.** Der Zahlungs-Block eines toten Lagebilds enthält trotzdem ein `.pay`-Objekt; `// 0` machte daraus „Kein Zahlungseingang" und „kein Abo" — zwei zuversichtliche Falschaussagen aus einer toten Quelle, direkt in der Rot-Probe sichtbar. Nur `ok`/`warn` dürfen Zahlen tragen.
+- **Eine Kopfzeile ohne Inhalt ist die stillste stille Null.** Ein jq-Compilefehler in `render_gate_lines` lieferte „Sechs Entscheidungen, etwa drei Minuten." — und danach nichts. Der Abend sah leer aus. Jetzt wird das Renderergebnis geprüft, bevor die Kopfzeile etwas verspricht.
+- **jq-Regex im Shell-Script braucht doppelte Backslashes** (`"\\s"`, `"\\["`). Einfache verschluckt jq mit „Invalid escape" und liefert *nichts* — wieder eine stille Null.
+- **Ein laufendes Bash-Script darf nicht bearbeitet werden.** Bash liest die Datei inkrementell nach; ein Edit während eines Hintergrundlaufs erzeugte „erselben: command not found" und einen Syntaxfehler in einer Zeile, die syntaktisch einwandfrei war. Bei parallelen Läufen: Kopie laufen lassen — dann aber `$HERE` beachten, sonst findet die Kopie `lagebild.sh` nicht.
+- **`date '+%a'` liefert unter MSYS „Sat".** Ein englischer Wochentag in einem deutschen Brief ist genau der Systemgeruch, der hier weg soll — Wochentage werden aus `date '+%w'` selbst gesetzt.
+
+### Rot-Proben (der Brief MUSS falsch aussehen können)
+
+| Probe | Ergebnis |
+|---|---|
+| `RITUAL_MCP_CONFIG=/gibt/es/nicht.json` | „Ich komme heute nicht ans Postfach: …" und „Deinen Kalender habe ich heute nicht erreicht: …" — **nicht** „Niemand hat geschrieben" / „Keine Termine" |
+| `MOLLIE_LIVE_API_KEY=live_kaputt` | „Ich konnte die Zahlungen nicht messen (error): Mollie /subscriptions HTTP 400" — **nicht** „Kein Zahlungseingang" (erst nach dem `state`-Fix, siehe oben) |
+| `GH_TOKEN=gho_kaputt` (Gate-Batch) | „Ich konnte heute nicht nachsehen, was auf dich wartet. Das heißt ausdrücklich nicht, dass nichts wartet." — **nicht** „Heute nichts zu entscheiden" |
+| Breiten-Probe | längste Zeile 64 Zeichen in beiden Briefen |
+| Wochen-Review (#63) unangetastet | vollständiger Lauf nach dem Umbau: 127 geschlossene Issues, 89 offene Entscheidungen, Vorschlagsblock gefüllt |
+
+### Kleine additive Erweiterung an `lagebild.sh`
+
+Der Zahlungs-Block liefert zusätzlich ein 24-Stunden-Fenster (`last24_total`, `last24_paid`, `last24_paid_eur`, `last24_failed_after_method`, `last24_paid_methods`, `payments_window_complete`). Grund: der Morgenbrief fragt „was hat sich seit gestern bewegt", nicht „wie war der Monat" — und ohne eigenes Fenster hätte er das aus `last_payments` raten müssen, also aus den letzten DREI Zahlungen. `payments_window_complete` sagt, ob die 50 abgeholten Zahlungen 24 h überhaupt abdecken. Der Morgenbrief ruft `lagebild.sh` jetzt mit `--amounts` auf (privater Kanal); `--redact` nimmt die Beträge wieder heraus.
