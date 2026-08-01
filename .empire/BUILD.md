@@ -419,3 +419,50 @@ rtk gh run list -R munirad7s/buzz --workflow empire-windows-canary.yml -L 3
 
 Timeout steht auf **120 min** statt der 60 upstream: der erste Fork-Lauf ist kalt, und 60 min wären
 ein falsches Rot. Mit warmem `rust-cache` liegt ein Lauf deutlich darunter.
+
+### 10.1 Welche Workflows auf dem Fork überhaupt laufen dürfen (buzz#113)
+
+Seit buzz#48 hängt ein echtes Gate an den Fork-Actions. Ein Gate ist aber nur so viel wert wie die
+Stille drumherum: zwischen dauerhaft roten Läufen fällt ein rotes Gate niemandem auf.
+
+**Gemessen am 2026-08-01 vor dem Aufräumen (buzz#113):** *ein* Push auf `main` startete fünf
+Workflows — `CI`, `Sprig`, `Docker image`, `helm chart`, `Auto-tag on Release PR Merge`; jeder PR
+zusätzlich `Desktop Release Candidate`. `Sprig` war dabei **reproduzierbar rot** (Job „Publish
+rolling release" → `release not found`): es gibt kein Rolling-Release auf dem Fork, das der Workflow
+aktualisieren könnte. In einer Agenten-Welle mit mehreren Merges pro Stunde war der Actions-Tab damit
+reines Rauschen.
+
+**Aktiv — nur diese zwei**
+
+| Workflow | Trigger auf dem Fork | Warum er bleibt |
+|---|---|---|
+| `CI` (`ci.yml`) | Push `main`, jeder PR | Die eigentliche Testsuite: Rust Lint, Unit Tests, Desktop E2E, Server-Cross-Compile, `cargo-deny`. Das ist Signal, kein Lärm — der Job `Security` hat am 01.08. RUSTSEC-2026-0224 auf `main` gemeldet, bevor es jemand bemerkt hätte. |
+| `Empire Windows Canary` (`empire-windows-canary.yml`) | Push `main` (mit `paths-ignore` für `.empire/**`, `**/*.md`, `docs/**`), Dispatch | Das Gate aus buzz#48: baut der Fork-Code auf Windows? Fork-eigene Datei, weil der Upstream-Canary auf jedem Fork inert ist. |
+
+**Stillgelegt per `gh workflow disable` (Stand 2026-08-01)**
+
+`disable` statt Datei-Guard, bewusst: der Zustand liegt bei GitHub, nicht im Baum — er überlebt
+damit jeden `git merge upstream/main`, ohne eine einzige Upstream-Zeile anzufassen. Ein additiver
+`if: github.repository == 'block/buzz'` wäre upstream-PR-fähig, würde aber zwölf Upstream-Dateien
+dauerhaft zu Konfliktkandidaten machen — der Fork lebt vom Merge. Rückgängig mit
+`rtk gh workflow enable "<Name>" -R munirad7s/buzz`.
+
+| Workflow | Grund |
+|---|---|
+| `Sprig` | Strukturell rot: aktualisiert ein Rolling-Release, das es nur upstream gibt. Nicht reparierbar. |
+| `Docker image` | Baut und pusht Relay-Images nach `ghcr.io/block/buzz` — dorthin darf der Fork nicht schreiben. |
+| `helm chart` | Lintet und publiziert Upstream-Charts, die der Fork nie anfasst. |
+| `Auto-tag on Release PR Merge` | Feuerte bei **jedem** PR-Close und taggt nach Upstreams Release-Schema. Der Fork taggt nie. |
+| `Desktop Release Candidate` | Feuerte bei **jedem** PR, validiert aber nur `version-bump/*`-Branches aus Upstreams Release-Prozess. |
+| `Release` | Desktop-Release-Publish auf `desktop-v*`-Tags. Der Fork taggt nie. |
+| `Publish Mobile Release Candidate` | Upstream-Store-Prozess, braucht Upstream-Secrets. |
+| `push gateway helm chart` | Publish nach `oci://ghcr.io/block/buzz/charts`. |
+| `Linux Canary` · `Signed macOS Canary` · `Windows Canary` | **Die gefährlichsten:** dispatch-only mit `if: github.repository == 'block/buzz'`. Auf dem Fork überspringen sie jeden Job und melden trotzdem **grün** — ein Dispatch beweist nichts und sieht aus wie ein Beweis. Genau die Falle, die buzz#48 aufgedeckt hat. `Signed macOS Canary` bräuchte zusätzlich Upstreams Signing-OIDC. |
+| `Harbor Buzz Orchestra` | Benchmark unter `benchmarks/harbor-buzz-orchestra/**` — Pfad wird hier nie berührt. |
+
+**Nachgemessen (gleicher Vorgang, nach dem Aufräumen):** PR → nur `CI`. Push auf `main` mit
+Code-Anteil → `CI` + `Empire Windows Canary`. Doku-only-Push → nur `CI`.
+
+**Regel für neue Workflows:** Auf diesem Fork läuft nur, was eine Aussage über *Fork-Code* macht.
+Alles, was Artefakte veröffentlicht, Upstream-Secrets braucht oder ohne Guard grün meldet, wird
+stillgelegt und hier mit Begründung eingetragen.
