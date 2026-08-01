@@ -3028,6 +3028,61 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Returns `true` when `error` reports an exhausted provider quota.
+///
+/// A quota window reopens hours or days later, never between two retries.
+/// Retrying burns the whole attempt budget and then drops the user's message
+/// with no notice at all — the failure mode this classifier removes.
+///
+/// # Classification rationale
+///
+/// Matched is only the machine-readable marker `usageLimitExceeded`, which
+/// `@agentclientprotocol/codex-acp` puts in `data.codexErrorInfo` when a
+/// ChatGPT subscription is out of quota. It reaches this classifier because
+/// [`acp::agent_error_from_json`] folds `data` into the message.
+///
+/// Prose such as "usage limit" or "usage credits" is deliberately **not**
+/// matched: a false positive drops a user request permanently, and the
+/// pre-existing `is_auth_error` test fixture "Usage credits required for 1M
+/// context" is exactly the kind of actionable, non-terminal error that must
+/// keep following the normal path.
+fn is_quota_error(error: &acp::AcpError) -> bool {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return false;
+    };
+    message.contains("usageLimitExceeded")
+}
+
+/// The user-visible notice for an outcome that must not be retried, or `None`
+/// when the outcome follows the normal retry path.
+///
+/// One place decides "retrying cannot help" so the caller posts exactly one
+/// notice per lost batch instead of one per attempt.
+fn non_retryable_notice(outcome: &PromptOutcome) -> Option<String> {
+    let PromptOutcome::Error(error) = outcome else {
+        return None;
+    };
+    if is_auth_error(error) {
+        return Some(
+            "⚠️ I couldn't process the last request: authentication failed. \
+             Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
+             and then re-send."
+                .to_string(),
+        );
+    }
+    if is_quota_error(error) {
+        // The provider's own text carries the reset time — that is the single
+        // most useful thing in the message, so it is passed through rather
+        // than summarised away. Credential-shaped fields were already masked
+        // when `data` was folded into the message.
+        return Some(format!(
+            "⚠️ I couldn't process the last request: the provider quota is exhausted, \
+             so retrying cannot help. Please re-send once it resets. Details: {error}"
+        ));
+    }
+    None
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3148,20 +3203,16 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
-            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
-                // Auth errors are non-retryable: the token won't self-repair
-                // between retries, so requeueing only wastes attempt slots and
-                // delays the visible failure. Dead-letter immediately and tell
-                // the user to re-authenticate the CLI.
+            } else if let Some(content) = non_retryable_notice(&result.outcome) {
+                // Auth failures and exhausted quotas do not self-repair between
+                // retries, so requeueing only wastes attempt slots and delays
+                // the visible failure — and once the budget is gone the message
+                // disappears without a word. Dead-letter immediately and say why.
                 tracing::warn!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
-                    "dead-lettering batch immediately — non-retryable auth error"
+                    "dead-lettering batch immediately — non-retryable error"
                 );
-                let content = "⚠️ I couldn't process the last request: authentication failed. \
-                    Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
-                    and then re-send."
-                    .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
@@ -6252,6 +6303,93 @@ mod error_outcome_emission_tests {
         );
     }
 
+    // ── is_quota_error / non_retryable_notice classification ───────────────
+
+    /// The exact string a codex-acp quota failure produces once
+    /// `agent_error_from_json` has folded `data` into the message
+    /// (measured payload from buzz#18).
+    fn codex_quota_error() -> acp::AcpError {
+        let raw = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "message": "You've hit your usage limit. Upgrade to Pro or try again at Aug 8th, 2026 9:14 AM.",
+                "codexErrorInfo": "usageLimitExceeded"
+            }
+        });
+        acp::agent_error_from_json(&raw)
+    }
+
+    #[test]
+    fn is_quota_error_matches_real_codex_payload() {
+        let e = codex_quota_error();
+        assert!(
+            is_quota_error(&e),
+            "exhausted subscription quota must be classified as non-retryable: {e}"
+        );
+        assert!(
+            !is_auth_error(&e),
+            "quota exhaustion is not an auth failure: {e}"
+        );
+    }
+
+    #[test]
+    fn is_quota_error_rejects_prose_and_transport_errors() {
+        // The pre-existing fixture from the auth tests: actionable, not terminal.
+        let credits = acp::AcpError::AgentError {
+            code: -32601,
+            message: "Usage credits required for 1M context — turn on usage credits".to_string(),
+        };
+        assert!(
+            !is_quota_error(&credits),
+            "prose about usage credits must NOT be dead-lettered"
+        );
+        let vague = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error".to_string(),
+        };
+        assert!(!is_quota_error(&vague), "a bare Internal error is unknown");
+        let io = acp::AcpError::Io(std::io::Error::other("pipe broke"));
+        assert!(!is_quota_error(&io), "I/O errors stay retryable");
+    }
+
+    #[test]
+    fn non_retryable_notice_keeps_auth_wording_and_adds_quota() {
+        // Auth wording is unchanged from before the quota case existed.
+        let auth = PromptOutcome::Error(acp::AcpError::AgentError {
+            code: -32000,
+            message: "API Error: 401 OAuth access token has expired.".to_string(),
+        });
+        let auth_notice = non_retryable_notice(&auth).expect("auth error must be non-retryable");
+        assert!(
+            auth_notice.contains("authentication failed"),
+            "got: {auth_notice}"
+        );
+        assert!(auth_notice.contains("codex login"), "got: {auth_notice}");
+
+        // Quota carries the provider's own reset hint through to the channel.
+        let quota = PromptOutcome::Error(codex_quota_error());
+        let quota_notice = non_retryable_notice(&quota).expect("quota error must be non-retryable");
+        assert!(
+            quota_notice.contains("quota is exhausted"),
+            "got: {quota_notice}"
+        );
+        assert!(
+            quota_notice.contains("Aug 8th, 2026 9:14 AM"),
+            "reset time must survive into the channel: {quota_notice}"
+        );
+    }
+
+    #[test]
+    fn non_retryable_notice_leaves_transient_outcomes_on_the_retry_path() {
+        let io = PromptOutcome::Error(acp::AcpError::Io(std::io::Error::other("pipe broke")));
+        assert!(non_retryable_notice(&io).is_none());
+        let exited = PromptOutcome::AgentExited;
+        assert!(non_retryable_notice(&exited).is_none());
+        let idle = PromptOutcome::Timeout(TimeoutKind::Idle);
+        assert!(non_retryable_notice(&idle).is_none());
+    }
+
     // ── auth error dead-letter behavior ────────────────────────────────────
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
@@ -6337,6 +6475,86 @@ mod error_outcome_emission_tests {
             queue.queued_event_count(&channel_id),
             0,
             "auth error must dead-letter immediately — no events should be pending"
+        );
+    }
+
+    /// An exhausted provider quota must dead-letter immediately as well: the
+    /// window reopens hours or days later, never between two retries. Before
+    /// this, buzz-acp burned all ten attempts and then dropped the user's
+    /// message with no notice at all (measured in buzz#18).
+    #[tokio::test]
+    async fn quota_error_dead_letters_immediately_without_requeueing() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(codex_quota_error()),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "quota exhaustion must dead-letter immediately — batch must not be requeued"
+        );
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            0,
+            "quota exhaustion must dead-letter immediately — no events should be pending"
         );
     }
 
