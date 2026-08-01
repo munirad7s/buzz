@@ -903,3 +903,9 @@ Der Wächter aus buzz#28 steht für diesen User jetzt auf **guarded** statt repo
 
 - **`GET /App/user` listet explizit verweigerte Scopes sehr wohl.** Die buzz#28-Notiz („omits fully denied scopes", daher „jeder neue Key = Zugewinn") war zu allgemein: Espo lässt Scopes weg, die **keine Rolle erwähnt** — Scopes, die eine Rolle auf `no` setzt, stehen drin. Gemessen: `buzz-agent` 15 Keys ohne eine einzige Verweigerung, `claude-mcp-admin` nach der Umstellung 40 Keys, davon 32 `read:"no"`. Ein neuer Key ist damit **kein** Beweis für Zugewinn — die Level lesen. `acl-core.mjs` rankt Level und stuft einen verweigerten Neuzugang korrekt als `new-scope` ein; nur der Text war falsch.
 - **`ActionHistoryRecord` bleibt lesbar und das ist kein Rest-Privileg.** `read: own` ist Espo-Systemvorgabe für jeden User (wie Preferences/Notification/Attachment) und über keine Rolle wegzunehmen. Eine 403-Erwartung darauf lässt einen sauberen Lauf fälschlich rot werden.
+
+### Nachtrag zu buzz#7: die Repo-Menge des Lagebilds (buzz#61)
+
+`block_backlog` liest nicht mehr nur `priorities.json`, sondern die **Vereinigung** aus Liste und den Repos, in denen eine owner-weite Suche `ready`/`blocked-munir`/`in-progress` sieht. Gemessen: drei Repos mit echten Empire-Tickets (`agency-handoff` mit einem P1-money-Epic und einem `blocked-munir`, `make_meony_no_shit`, `azubi-swipe-connect`) standen in keiner Zeile — `blocked` sprang von 82 auf 87.
+
+Die Nachzügler werden als `repos_untracked` **namentlich** gemeldet und setzen den Block auf `warn`. Sie zählen mit (die Zahl ist vollständig), aber die Liste soll nachgepflegt werden statt still zu veralten — deshalb ändern sie den Exit-Code nicht, `repos_unreadable` und `repos_truncated` dagegen schon. `LAGEBILD_REPOS` schaltet die Entdeckung bewusst ab, sonst wäre die Rot-Probe „Repo unlesbar" nicht mehr durchführbar.
