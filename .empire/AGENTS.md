@@ -663,7 +663,7 @@ Begründung: Ein Workflow kann ausschließlich `send_message`. Der Bestand vom 3
 | `workflows runs --workflow <id>` | liefert `[]` — **auch nach einem nachweislich erfolgreichen manuellen Trigger** (`run_id` in der Antwort, Nachricht im Kanal). Die Run-Liste ist also KEIN Beweismittel; wer daraus „nie gelaufen" schließt, misst das falsche Ding |
 | Direkte Probe | Workflow auf eine Zielminute 3 min in der Zukunft gesetzt (`accepted: true`), 6 min gepollt → **keine Nachricht**; danach sauber zurückgesetzt und der Revert verifiziert |
 
-Der Relay ist gehostet (`adaswin.communities.buzz.xyz`, `/health` = ok) — die Ursache liegt serverseitig und ist von hier nicht reparierbar (Kandidaten im Code: `check_owner_authority`, `list_all_enabled_workflows`). **Konsequenz: der tatsächliche Auslöser ist die Windows-Aufgabenplanung, die Buzz-Workflows bleiben als Kanal-Definition bestehen und greifen automatisch, sobald der Relay-Scheduler wieder feuert.** Beides zeigt auf dasselbe Kommando — kein Doppelbau, aber auch kein Ritual, das an einem kaputten Scheduler hängt. Folge-Ticket: buzz#55.
+Der Relay ist gehostet (`adaswin.communities.buzz.xyz`, `/health` = ok) — die Ursache liegt serverseitig und ist von hier nicht reparierbar (Kandidaten im Code: `check_owner_authority`, `list_all_enabled_workflows`). **Konsequenz: der tatsächliche Auslöser ist die Windows-Aufgabenplanung, die Buzz-Workflows bleiben als Kanal-Definition bestehen und greifen automatisch, sobald der Relay-Scheduler wieder feuert.** Beides zeigt auf dasselbe Kommando — kein Doppelbau, aber auch kein Ritual, das an einem kaputten Scheduler hängt. Folge-Ticket: buzz#60.
 
 **Nebeneffekt: das DST-Problem ist damit weg.** Die Aufgabenplanung rechnet in Ortszeit, 08:45 bleibt 08:45 — auch nach dem 25.10.2026. Die UTC-Crons in den Workflows tragen den Umstellungshinweis trotzdem in der `description` (`45 6` → `45 7`, `45 18` → `45 19`), damit sie beim Wiederanlaufen des Relay-Schedulers nicht eine Stunde daneben feuern.
 
@@ -695,7 +695,7 @@ Exit-Codes beantworten nur die Erhebung: `0` vollständig · `1` mit benannten L
 
 ### Gemessene Falle: die Repo-Liste war still unvollständig
 
-`priorities.json` ist eine gepflegte Liste und hinkt neuen Repos hinterher: 82 blocked-munir aus der Liste gegen 83 laut owner-weiter Suche — `munirad7s/agency-handoff` fehlte. Das Script bildet deshalb die **Vereinigung** aus Liste und Suchtreffern und fragt danach je Repo exakt ab (Suche allein truncatet still). Dass das Lagebild aus buzz#7 dieselbe Liste benutzt, macht seine Backlog-Zahlen um dasselbe Repo zu klein → Folge-Ticket buzz#56.
+`priorities.json` ist eine gepflegte Liste und hinkt neuen Repos hinterher: 82 blocked-munir aus der Liste gegen 83 laut owner-weiter Suche — `munirad7s/agency-handoff` fehlte. Das Script bildet deshalb die **Vereinigung** aus Liste und Suchtreffern und fragt danach je Repo exakt ab (Suche allein truncatet still). Dass das Lagebild aus buzz#7 dieselbe Liste benutzt, macht seine Backlog-Zahlen um dasselbe Repo zu klein → Folge-Ticket buzz#61.
 
 ### Werkzeug-Fallen, die hier abgeräumt sind
 
@@ -718,7 +718,7 @@ Exit-Codes beantworten nur die Erhebung: `0` vollständig · `1` mit benannten L
 | Vault-Tagesnotiz | je Ritual eine Zeile über `~/.buzz/vault-log.sh` (buzz#11) |
 | Scheduler | Windows-Aufgaben `Buzz-Ritual-Morgenbrief` / `Buzz-Ritual-Gate-Batch`, Timing durch vorgezogenen Trigger live bewiesen |
 
-**Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector). Er steht als benannte Lücke im Brief — nicht weggelassen. Folge-Ticket buzz#57.
+**Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector). Er steht als benannte Lücke im Brief — nicht weggelassen. Folge-Ticket buzz#62. Drittes Ritual (Wochen-Review So 18:00): buzz#63.
 
 ## ⚖️-Marker werden Entscheidungs-Entwürfe (buzz#42 — `.empire/tools/decision-drafts.sh`)
 
@@ -790,3 +790,116 @@ Ein **mehrzeiliges** `node -e '…'` führt in dieser Umgebung (Git Bash + Volta
 Zweite Falle derselben Klasse: `console.log` unmittelbar vor `process.exit(0)` verliert unter Windows die Ausgabe, wenn stdout eine Pipe ist — der Handshake schreibt deshalb mit `fs.writeSync(1, …)`.
 
 **Offen (bewusst nicht gemacht):** die Einhängung in den Morgenbrief (`.empire/tools/ritual.sh`, buzz#10). Das Script war beim Bau dieses Tickets gerade frisch gemerged und gehört einem parallel laufenden Agenten — ein Eingriff hätte einen Konflikt in einer 473-Zeilen-Datei riskiert, die hier niemand verifizieren konnte. Der Hook ist ein Dreizeiler: `bash "$HERE/nest-doctor.sh" --format json` einsammeln, bei `exit != 0` eine Zeile „Werkzeugbestand driftet" in den Lage-Block schreiben.
+### Workflow-Quellen (Export 2026-08-01, Kanal `#general` `96067fa5-…`)
+
+Beide Workflows sind editiert, nicht dupliziert (`workflows delete` wird angenommen, löscht aber nicht — Neutralisieren geht nur über `enabled: false`). Owner ist der Agent-Pubkey `78be5e27…`; NIP-33-Ersetzung funktioniert nur mit demselben Schlüssel, deshalb muss `buzzx.sh --key agent:<pubkey>` verwendet werden.
+
+```yaml
+# 88c25e55-c928-4651-83a5-9be86a2d89f3
+name: Daily Morning Brief
+description: "08:45 Europe/Berlin. Cron laeuft UTC (timezone-Feld wird still ignoriert): 45 6 = 08:45 CEST;
+  ab Winterzeit 25.10.2026 auf 45 7 aendern. Inhalt kommt aus .empire/tools/ritual.sh (gemessen), nicht aus
+  Modellwissen. Achtung: der Relay-Scheduler feuert diesen Workflow Stand 2026-08-01 NICHT (gemessen, buzz#10)
+  - der echte Ausloeser ist die Windows-Aufgabe Buzz-Ritual-Morgenbrief."
+enabled: true
+trigger:
+  on: schedule
+  cron: "45 6 * * *"
+steps:
+  - id: ask_claude
+    action: send_message
+    text: |
+      @claude MORGENBRIEF 08:45 (Europe/Berlin).
+      Fuehre GENAU dieses Kommando aus und poste nichts anderes:
+        bash C:/Users/rescue/projects/buzz/.empire/tools/ritual.sh morgenbrief --post --telegram --vault
+      … (Regeln: keine Zahl erfinden, keine Luecke aus dem Gedaechtnis fuellen,
+          bei Exit 2/3 den Exit-Code melden statt einen Ersatzbrief zu posten)
+
+# 857d07e7-385a-4eff-8163-a7476dc6af16
+name: Daily Munir Gate Batch
+description: "20:45 Europe/Berlin. Cron laeuft UTC: 45 18 = 20:45 CEST; ab Winterzeit 25.10.2026 auf 45 19
+  aendern. … der echte Ausloeser ist die Windows-Aufgabe Buzz-Ritual-Gate-Batch."
+enabled: true
+trigger:
+  on: schedule
+  cron: "45 18 * * *"
+steps:
+  - id: ask_claude
+    action: send_message
+    text: |
+      @claude ABEND-GATE-BATCH 20:45 (Europe/Berlin).
+        bash C:/Users/rescue/projects/buzz/.empire/tools/ritual.sh gate-batch --post --telegram --vault
+      … (Ist die Liste leer, obwohl Repos unlesbar waren, sagt das Script das
+          selbst — nicht in "heute nichts zu tun" umdeuten)
+```
+
+Der 30.07. hinterlässt zusätzlich `6fa01e2b-…` (`daily-briefing`) mit `enabled: false` — nicht löschbar, bewusst als Grabstein stehen gelassen. Diente in buzz#10 als Scheduler-Sonde, weil ihr Text (`deaktiviert`) keinen Agenten weckt.
+
+### DST — warum hier nichts bricht
+
+| Ebene | Zeitbasis | Umstellung 25.10.2026 |
+|---|---|---|
+| Windows-Aufgabenplanung (**produktiver Auslöser**) | Ortszeit | nichts zu tun — 08:45 bleibt 08:45 |
+| Buzz-Workflow-Cron (Reserve) | UTC, `timezone` wird still ignoriert | `45 6` → `45 7`, `45 18` → `45 19`; Hinweis steht in der `description` |
+
+### Falle: MSYS zerlegt Windows-Optionen
+
+`schtasks /Query` wird von Git Bash zu `schtasks C:/Program Files/Git/Query` — **jeder** schtasks-Aufruf scheitert, und wer die Ausgabe wegwirft, hält den Fehlschlag für Erfolg. `MSYS_NO_PATHCONV=1` setzen (oder `//Query` schreiben). Gehört zur selben Familie wie die UTF-8-argv-Falle: unter MSYS ist jedes Argument, das mit `/` beginnt oder Multibytes enthält, verdächtig.
+
+## `claude-mcp-admin` entschärft (buzz#52 — erst der Verbraucher, dann die Rechte)
+
+Der Espo-User, der 231 von 282 Leads schreibt und dabei 61 Scopes hielt, hat jetzt genau einen: `Lead`. Die eigentliche Arbeit war die Ermittlung — Rechte kürzen war danach ein Fünfzeiler.
+
+### Wie der unbekannte Verbraucher gefunden wurde (in dieser Reihenfolge)
+
+1. **Key-Identität statt Namens-Vermutung.** `sha256` von `ESPOCRM_MCP_API_KEY` (`~/.secrets/master.env`) gegen `sha256` von `ESPOCRM_API_KEY` in `/opt/agency/crm-sync/espo-credentials` auf adas-hetzner — **identisch**. Gegenprobe mit dem Key selbst: `GET /App/user` → `userName: claude-mcp-admin`. Kein Raten, kein Plaintext im Log.
+2. **Der Container schreibt ein Access-Log mit User-Agent.** `docker logs agency-crm-espocrm --since 36h | grep '01/Aug/2026:04:1'` zeigt um 04:15:08 UTC die Sequenz `GET /Lead?where[cPlaceId]=…` → `POST /Lead`, User-Agent **`node`** — sauber getrennt von `n8n`, `Uptime-Kuma/2.4.0` und `curl/8.14.1` in denselben Sekunden. **Das ist der Hebel, den `AuthLogRecord` nicht hat:** die Quell-IP ist immer Traefik, der User-Agent nicht.
+3. **Der Cron dazu:** `/etc/cron.d/agency-crm-sync` → `15 4 * * * root /opt/agency/crm-sync/batch-ingest.sh` (ADA-244, „Batch-Auffangnetz"). Passt sekundengenau auf den Lead-Burst.
+4. **Bedarf am Code gemessen, nicht am Namen.** Die ganze Kette geht durch **einen** Client (`packages/crm-sync/src/espo.mjs`), und der kennt nur `/Lead`: `findLeadId` (GET), `countLeads` (GET), `listLeads` (GET paginiert), `createLead` (POST), `updateLead` (PUT), `deleteLead` (DELETE). Gegenprobe per Grep über `packages/crm-sync` + `packages/followup-engine`: genau **eine** weitere `fetch`-Stelle (`purge-test`), sonst keine.
+
+**Zweiter, schlafender Verbraucher:** `agency/infra/stacks/crm/mcp` (`@adas/espocrm-mcp`, Voll-CRUD, liest denselben Key aus `master.env`) — in **keiner** MCP-Config mehr verdrahtet, abgelöst durch `espo-mcp`/`buzz-agent` (buzz#6). `provision-claude-mcp-user.mjs` legt den User an, authentifiziert sich aber per **Admin-Basic-Auth**, nicht mit dem Key — es braucht die Platform-Scopes also auch nicht. Wer das Skript erneut laufen lässt, bläst die Rolle wieder auf 61 Scopes; der Wächter schlägt dann an.
+
+### Zwei Ticket-Prämissen waren falsch — gemessen korrigiert
+
+- „Kann Rollen und API-User anlegen, Auth-Tokens und App-Secrets lesen" stimmt **nicht**. Mit dem Key gemessen: `GET /AuthToken` → 403, `GET /AppSecret` → 403, `GET /Role` → 403, `POST /User` → 403, `POST /Role` → 403. **Espo hält diese Scopes admin-only, egal was die Rolle behauptet.** Eine Rolle kann also weit gefährlicher aussehen, als sie ist — vor dem Erschrecken mit dem Key nachmessen.
+- Real gefährlich war etwas anderes: `read/edit/delete: all` + `create` auf Email, Contact, Account, Opportunity, Document, Campaign, Task, Meeting, Call, Case, CTouchpoint, CConsent, TargetList, MassEmail, KnowledgeBase, Template — plus `exportPermission: yes` (CSV-Abzug der ganzen Vertriebsbasis) und `dataPrivacyPermission: yes` (DSGVO-Löschen/Anonymisieren).
+
+### Was jetzt gilt
+
+Rolle **`mcp-crm (measured demand, buzz#52)`** ersetzt `claude-mcp-admin` (Rolle bleibt liegen, ist der Rollback-Anker):
+
+| Scope | Recht | Warum |
+|---|---|---|
+| `Lead` | `create/read/edit/stream`, **`delete: no`** | der Nachtlauf legt an, dedupliziert und aktualisiert |
+| alle 60 übrigen Scopes | explizit `:no` (bzw. `false`) | **ausgeschrieben statt weggelassen** — Espo mergt Rollen per Maximum, eine weggelassene Zeile wäre nur solange dicht, wie das die einzige Rolle bleibt |
+| alle Value-Permissions | `no` | export, massUpdate, dataPrivacy, audit, assignment, user, portal … |
+
+**`delete` fällt, anders als bei buzz#29.** Dort brauchte ein täglicher Live-Flow (`[E2E] funnel-probe`) das DELETE nachweislich. Hier ruft es nur das handgestartete CLI `crm-sync purge-test` (räumt `[TEST-INGEST]`-Leads auf) — kein Cron, kein n8n-Flow, keine Logzeile. Wird es je gebraucht: mit dem `n8n-agent`-Key laufen lassen (der behält Lead-delete) oder aus einer Admin-Session. Ein stehendes `delete: all` auf die Vertriebsbasis ist kein Preis für eine manuelle Testaufräumung.
+
+**Rollback:** `ESPO_ADMIN_PW=… node tools/apply-mcp-crm-role.mjs --rollback` (weist Rolle `6a2c90e047546013e` zurück). **Nie die Rolle entfernen** — ein Espo-User ohne Rolle hat Vollzugriff. Das Set-Skript rollt bei jedem roten Check selbst zurück; das ist im Lauf real passiert (eine Fehlannahme über `ActionHistoryRecord`), der Rückweg ist also getestet, nicht nur dokumentiert.
+
+### Beweis (34/34 direkt + echte Läufe des Verbrauchers)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Verbraucher belegt | sha256-Match Key ↔ `espo-credentials`, `GET /App/user` → `claude-mcp-admin`, Access-Log 04:15:08 UTC UA `node`, Cron `15 4 * * *` |
+| Lesepfade (countLeads, listLeads-Pagination, findLeadId per `cPlaceId`) | 200 |
+| Schreibpfade POST `/Lead` (volle Ingest-Payload inkl. `phoneNumber` + Postanschrift) und PUT `/Lead/<id>` | 200 |
+| **Detektor rot**: DELETE `/Lead/<id>` mit dem Key | **403** |
+| Entzogen: GET auf Contact, Account, Opportunity, Email, Document, Campaign, Task, Meeting, Call, Case, CTouchpoint, CConsent, User, Team, Portal, TargetList, MassEmail, EmailTemplate, Template, KnowledgeBase, Webhook · POST Contact/Email | **403** (22 + 2 Proben) |
+| Unverändert admin-only | AuthToken, AppSecret, Role weiter 403 |
+| **Echter Lauf**: `crm-sync ingest` (Produktions-Image + echte `espo-credentials`) | `created=1`, CRM 282 → 283 |
+| **Echter Lauf**: `crm-sync ingest --update` (Dedupe + PUT) | `updated=1`, 283 → 283 |
+| **Echter Lauf**: `crm-sync letter-ready` (Pagination über den Gesamtbestand) | 249 briefbereite Leads, 12.45 Werktage |
+| **Echter Lauf**: `sweep-run.sh` (Pfad des n8n-Flows `[ADA-282]`) | Report-JSON, Probe-Lead als `enrich` einsortiert |
+| **Echter Lauf**: `crm-sync backfill-hooks --dry-run` | 2/2 Rekonstruktions-Treue |
+| ACL-Wächter lokal | grün, 3/3 User |
+| ACL-Wächter im Scheduler (n8n `141613`/`141615`) | `alarm: false`, kein Telegram |
+| Aufräumen | Probe-Lead per Admin-Session gelöscht (der Key kann es nicht mehr — genau das ist der Punkt) |
+
+Der Wächter aus buzz#28 steht für diesen User jetzt auf **guarded** statt report-only: solange der Verbraucher unbekannt war, war Berichten richtig — nach der Messung ist Alarmieren richtig.
+
+### Zwei Espo-Fallen, die dabei aufgefallen sind
+
+- **`GET /App/user` listet explizit verweigerte Scopes sehr wohl.** Die buzz#28-Notiz („omits fully denied scopes", daher „jeder neue Key = Zugewinn") war zu allgemein: Espo lässt Scopes weg, die **keine Rolle erwähnt** — Scopes, die eine Rolle auf `no` setzt, stehen drin. Gemessen: `buzz-agent` 15 Keys ohne eine einzige Verweigerung, `claude-mcp-admin` nach der Umstellung 40 Keys, davon 32 `read:"no"`. Ein neuer Key ist damit **kein** Beweis für Zugewinn — die Level lesen. `acl-core.mjs` rankt Level und stuft einen verweigerten Neuzugang korrekt als `new-scope` ein; nur der Text war falsch.
+- **`ActionHistoryRecord` bleibt lesbar und das ist kein Rest-Privileg.** `read: own` ist Espo-Systemvorgabe für jeden User (wie Preferences/Notification/Attachment) und über keine Rolle wegzunehmen. Eine 403-Erwartung darauf lässt einen sauberen Lauf fälschlich rot werden.

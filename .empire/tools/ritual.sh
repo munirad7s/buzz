@@ -394,25 +394,19 @@ post_telegram() {
   local body; body="$(sed -e 's/\*\*//g' -e 's/`//g' "$file")"
   if [ "${#body}" -gt 3900 ]; then body="${body:0:3900}"$'\n\n…gekürzt für Telegram — Volltext im Buzz-Kanal.'; fi
   # UTF-8 stirbt in curls argv (MSYS) — Body IMMER über stdin.
+  # Kein parse_mode: das Markup ist oben schon entfernt, und Telegrams
+  # Legacy-Markdown stolpert zusaetzlich ueber "[repo#nr]" (Link-Syntax ohne
+  # Ziel) — gemessen. Ein Pfad statt Versuch-und-Fallback.
   local resp
-  resp="$(jq -n --arg c "$chat" --arg t "$body" '{chat_id:$c, text:$t, parse_mode:"Markdown", disable_web_page_preview:true}' \
+  resp="$(jq -n --arg c "$chat" --arg t "$body" '{chat_id:$c, text:$t, disable_web_page_preview:true}' \
           | curl -sS --max-time 30 -X POST -H 'Content-Type: application/json' \
                  --data-binary @- "https://api.telegram.org/bot$token/sendMessage" 2>&1)"
   if [ "$(printf '%s' "$resp" | jq -r '.ok' 2>/dev/null)" = "true" ]; then
     TG_OK=1
     printf 'telegram: zugestellt (message_id %s)\n' "$(printf '%s' "$resp" | jq -r '.result.message_id')" >&2
   else
-    # Markdown-Parser kann an Sonderzeichen scheitern — einmal ohne parse_mode nachfassen.
-    resp="$(jq -n --arg c "$chat" --arg t "$body" '{chat_id:$c, text:$t, disable_web_page_preview:true}' \
-            | curl -sS --max-time 30 -X POST -H 'Content-Type: application/json' \
-                   --data-binary @- "https://api.telegram.org/bot$token/sendMessage" 2>&1)"
-    if [ "$(printf '%s' "$resp" | jq -r '.ok' 2>/dev/null)" = "true" ]; then
-      TG_OK=1
-      printf 'telegram: zugestellt ohne Markdown (message_id %s)\n' "$(printf '%s' "$resp" | jq -r '.result.message_id')" >&2
-    else
-      printf 'telegram: ZUSTELLUNG FEHLGESCHLAGEN: %s\n' "$(printf '%s' "$resp" | head -c 200)" >&2
-      TRANSPORT_FAIL=1
-    fi
+    printf 'telegram: ZUSTELLUNG FEHLGESCHLAGEN: %s\n' "$(printf '%s' "$resp" | head -c 200)" >&2
+    TRANSPORT_FAIL=1
   fi
 }
 
