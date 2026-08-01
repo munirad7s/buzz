@@ -13,7 +13,10 @@ REM Die Aufgabe MUSS als eingeloggter Benutzer laufen: buzzx.ps1 liest den
 REM Relay-Schluessel aus dem Windows Credential Manager, und dessen
 REM Benutzer-Tresor ist ohne Benutzersitzung nicht entschluesselbar.
 setlocal
-if "%~1"=="" (echo usage: ritual-task.cmd ^<morgenbrief^|gate-batch^> & exit /b 64)
+if not "%~1"=="" goto :havemode
+echo usage: ritual-task.cmd morgenbrief ^| gate-batch
+exit /b 64
+:havemode
 
 set "GITBASH=C:\Program Files\Git\bin\bash.exe"
 if not exist "%GITBASH%" set "GITBASH=%ProgramFiles%\Git\bin\bash.exe"
