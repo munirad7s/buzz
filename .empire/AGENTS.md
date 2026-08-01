@@ -1127,3 +1127,52 @@ Verworfen: **Espo-Custom-Feld** (braucht Schreibrechte, die der Agent bewusst ni
 | Live über den Nest | `.empire/tools/mcp-call.mjs --server espo-mcp --list` zeigt 7 Tools; alle drei Ticket-Fälle über `~/.buzz/.mcp.json` gegen den Live-Checkout gefahren |
 
 **Live-Hinweis:** Der Nest startet `C:/Users/rescue/mcp-servers/espo-mcp/src/index.ts` — der Arbeits-Checkout stand auf einem längst gemergten Feature-Branch. Nach dem Merge wurde er auf `master` gezogen, sonst wäre das Tool im Repo, aber nicht im Nest gewesen. **Ein gemergter PR ist noch kein laufendes System.**
+
+## `delete: all` fällt beim n8n-CRM-User (buzz#53 — der Probe räumt nur noch sein eigenes Artefakt weg)
+
+Nach buzz#29 hing das letzte `delete: all` auf Lead und CTouchpoint an genau **einem** Flow: dem täglichen Cleanup von `[E2E] funnel-probe`. Ein fehlerhafter Node hätte damit die ganze Vertriebsbasis löschen können. Der Ausweg war nicht, dem Probe das Löschen zu nehmen — er ist selbst ein Monitoring-Asset —, sondern ihm beizubringen, dass ihm sein Artefakt gehört.
+
+### Der Kern: Espos `own` greift auf `assignedUser`, nicht auf `createdBy`
+
+Deshalb reichte `delete: own` allein nicht: der Probe legt seinen Lead über den **echten** Funnel an (`POST` auf den Formular-Webhook → `[ADA-44] crm-lead-upsert`), und der lässt `assignedUser` leer — genau wie bei allen ~280 echten Leads. Mit `own` wäre auch der Probe-Lead gesperrt gewesen.
+
+**Lösung:** zwei neue Nodes im Probe, die das Artefakt unmittelbar vor dem Cleanup an den eigenen API-User hängen:
+
+| Node | Was | Wo |
+|---|---|---|
+| `CL Claim Lead` | `PUT /Lead/<id> {assignedUserId: n8n-agent}` | zwischen `Has Lead?` (true) und `CL Find TPs` |
+| `CL Claim TP` | `PUT /CTouchpoint/<id> {assignedUserId: n8n-agent}` | zwischen `CL Split TPs` und `CL Delete TP` |
+
+Danach: Rolle `n8n-crm` auf `delete: own` für Lead **und** CTouchpoint. Echte Leads bleiben unassigned und sind mit diesem Key nicht mehr löschbar.
+
+Zwei Ausdrücke mussten mitwandern, weil jetzt ein Node dazwischen sitzt und `$json` eine andere Form hat: `CL Find TPs` liest die Lead-ID nicht mehr aus `$json.leadId`, sondern aus `$('Evaluate').first().json.leadId`; `CL Delete TP` nimmt die TP-ID über `$('CL Split TPs').item.json.tpId` statt aus dem direkten Vorgänger. **Das ist die generische Falle beim Einschieben eines Nodes in eine n8n-Kette** — der Nachfolger erbt still die Item-Form des neuen Vorgängers.
+
+### Reihenfolge (nicht verhandelbar)
+
+Erst den Workflow ändern (Claims greifen, `delete: all` gilt noch → nichts kann brechen), Lauf beweisen, **dann** die Rolle verengen, Lauf erneut beweisen. Umgekehrt hätte der Probe zwischen beiden Schritten rot geloggt und Kuma/Telegram alarmiert.
+
+### Rollback (zwei getrennte Hebel)
+
+- Rechte: `ESPO_ADMIN_PW=… node tools/apply-n8n-crm-role.mjs --restore-29` → dieselbe Rolle mit `delete: all`. **Nicht** `--rollback` verwenden, das führt auf die Vor-#29-Rolle `agent-api` zurück und wirft buzz#29 mit weg. Das Set-Skript rollt bei rotem Check jetzt selbst auf den #29-Stand statt auf `agent-api`.
+- Workflow: `node tools/patch-funnel-probe-claim.mjs --revert`.
+
+### Beweis (22/22 direkt + zwei echte Probe-Läufe)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Probe-Lauf **vor** der Rechteänderung (Execution `141644`) | success — Workflow-Umbau allein bricht nichts |
+| Lese-/Schreibpfade der übrigen Flows (GET Lead/Contact/CTouchpoint, POST/PUT Lead, POST/PUT CTouchpoint, POST CConsent) | 200 |
+| **Detektor rot:** DELETE auf einen unassigned Lead mit dem n8n-Key | **403** |
+| **Detektor rot:** DELETE auf einen unassigned CTouchpoint | **403** |
+| Nach `PUT assignedUserId` dieselben DELETEs | 200 |
+| Probe-Lauf **nach** der Rechteänderung (Execution `141651`) | success — `CL Claim Lead` → `assignedUserId: n8n-agent`, `CL Claim TP` → dito, `CL Delete TP` → `true`, `CL Delete Lead` → `true`, `Kuma Up` → `ok` |
+| Rückstände im CRM (`[E2E-PROBE]`, `ZZ ACL`) | 0 |
+| Unverändert entzogen (buzz#29): Account, Contact create/edit/delete, CConsent edit/delete, Opportunity, Email | 403 |
+| ACL-Wächter (#28) gegen den neuen Snapshot | grün, 3/3 User |
+
+Damit ist der CRM-Schreibpfad komplett: **kein API-User kann noch fremde Datensätze löschen.** `buzz-agent` liest + hängt Touchpoints an, `claude-mcp-admin` (buzz#52) kann nur Lead und gar nicht löschen, `n8n-agent` löscht nur, was ihm zugewiesen ist.
+
+### Zwei gemessene Korrekturen an früheren Notizen
+
+- **n8n beachtet `settings.timezone` sehr wohl.** Die buzz#28-Notiz („Crons laufen UTC, das `timezone`-Feld wird still ignoriert") stimmt nur für Workflows **ohne** `settings.timezone` — die fallen auf die Instanz-Vorgabe zurück, und die ist hier `GENERIC_TIMEZONE=UTC`. Gemessen am 01.08.: `[E2E] funnel-probe` hat `settings.timezone: Europe/Berlin`, sein Cron `45 6 * * *` feuerte um **04:45 UTC** = 06:45 CEST; `[BUZZ-28] espo-acl-drift` hat kein `timezone`, sein `20 5 * * *` ist echtes 05:20 UTC. Folge: der Wächter wandert im Winter auf 06:20 Ortszeit, der Probe nicht. (Für **Buzz**-Workflows bleibt die UTC-Regel gültig — das ist ein anderer Scheduler.)
+- **`n8n_update_partial_workflow` (MCP) kann diese Workflows nicht schreiben.** `validateOnly: true` geht durch, das Anwenden scheitert mit `request/body must NOT have additional properties`: die n8n-Public-API weist die Read-only-Felder zurück, die ihr eigener GET liefert. Umweg, der funktioniert: GET, in JS patchen, `PUT` mit **nur** `name`/`nodes`/`connections`/`settings` (`tools/patch-funnel-probe-claim.mjs`). Nebenbei: ein `\u2014` im `notes`-Feld einer `addNode`-Operation kippt dieselbe Validierung — Node-Notizen ASCII halten.
