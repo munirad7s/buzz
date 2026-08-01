@@ -126,3 +126,56 @@ Espo = Pipeline-Wahrheit (Status, Score, `cNextAction`, Touchpoint-Historie). Va
 | **Detektor kann rot werden** | Agent-Key auf `PUT Lead` → 403, `DELETE Lead` → 403, `POST Lead` → 403, `GET Email` → 403; Lead-Status danach unverändert |
 | Cleanup | Touchpoint + Note + Test-Lead gelöscht: Agent-GET 404, `deleted: true`, Suche 0 Treffer |
 | Koexistenz n8n | Nach der Umstellung gemessen: n8n-User `claude-mcp-admin` unverändert (`delete: all`), liest weiter 284 Leads; `[ADA-22] lead-enrich` zuletzt grün (Execution 140686). Der Nachtlauf-Beweis für die kommende Nacht steht noch aus. |
+
+## Approval-Gate (buzz#9 — kein Outbound ohne Freigabe)
+
+Doktrin: `.empire/POLICY.md` (drei Klassen FREI · GATED · VERBOTEN). Werkzeug: `.empire/gate.sh`. Agenten-Kurzfassung liegt in `~/.buzz/AGENTS.md` und erreicht damit alle fünf Nest-Agenten (Bumble, claude, codex, Fizz, Honey).
+
+**Entschieden: TG-Spiegel statt nativer `request_approval`-Workflow** — nicht aus Vorliebe, sondern weil der native Weg heute nicht trägt (s. Vorflug-Befund unten).
+
+### Vorflug-Befund: `request_approval` ist Upstream halbfertig (gemessen 2026-08-01)
+
+Der Ticket-Hinweis „Action existiert" stimmt, ist aber irreführend — die Hälfte fehlt, und zwar die entscheidende:
+
+| Schicht | Stand |
+|---|---|
+| Schema (`crates/buzz-workflow/src/schema.rs`) | ✅ `RequestApproval { from, message, timeout }` parst |
+| Executor (`.../executor.rs:650-669`) | ⚠️ liefert `Suspended` + Token, aber `// TODO (WF-08): create approval record in DB, emit kind:46010` — **niemand wird benachrichtigt** |
+| Engine (`.../lib.rs:229-253`) | ❌ `finalize_run` setzt den Run bei Approval-Token auf **`Failed`** („approval gates not yet implemented — see WF-08") |
+| Relay (`handlers/command_executor.rs`) | ✅ fertig: `handle_approval_grant`/`_deny`, Approver-Spec-Prüfung, Expiry, Resume |
+| DB/SDK/CLI | ✅ `create_approval`, kind `46010`, `buzz workflows approve --token` |
+
+Konsequenz: **ein Workflow mit `request_approval` schlägt fehl, statt zu warten.** Fail-closed, aber als Gate wertlos: keine Anfrage erreicht Munir, nichts ist freigebbar. Upstream bestätigt das selbst — die Konformitätstests dazu stehen in einer `pending_lane` („blocked until the executor approval gate (WF-08) mints pending approvals", `crates/buzz-test-client/tests/conformance_multitenant.rs:1866-1945`).
+
+Übernahmepfad: sobald WF-08 landet (oder wir es upstream beisteuern), wird `gate.sh` zum Adapter — Anfrage/Verdikt bleiben gleich, nur der Transport wechselt auf kind 46010. Folge-Ticket buzz#31.
+
+### Wie das Gate funktioniert
+
+Anfrage = strukturierte Nachricht (Klasse · Aktion · Grund · **echter Payload** · Gate-ID) in Munirs privaten TG-Chat über den Bestands-Bot aus buzz#5. Verdikt = seine Antwort, die die zufällige Gate-ID nennt. `gate.sh run -- <kommando>` führt das Kommando **nur** bei Freigabe aus; Ablehnung (10) und Timeout (11) führen zu gar nichts.
+
+Fünf Bedingungen müssen gleichzeitig halten, sonst zählt eine Nachricht nicht als Verdikt: richtiger Chat · richtiger Absender · nach der Anfrage gesendet · nennt die Gate-ID · enthält ein Verdikt-Wort. „Nein" schlägt „Ja"; Gate-ID ohne erkennbares Verdikt = weiter warten, nie raten.
+
+**Leser-Koexistenz mit telegram-mcp:** `gate.sh` pollt im **Peek-Modus** — es liest `getUpdates` mit dem Offset aus `~/.telegram-mcp-state.json`, schreibt ihn aber **nie** fort. Der MCP-Server bleibt alleiniger Besitzer des Lesezeigers; das Gate stiehlt keine Nachrichten aus dem Agenten-Postfach. Umgekehrt gilt: bestätigt telegram-mcp ein Verdikt weg, bevor das Gate es sieht, läuft das Gate in den Timeout — also in die sichere Richtung.
+
+### Audit (drei Schichten)
+
+Kanal (Anfrage + Freigabe mit `message_id`) · Hash-Kette `~/.buzz/gate-audit.jsonl` (append-only, jede Zeile bindet die vorherige; `gate.sh audit --verify`) · Vault-Tagesnotiz über `~/.buzz/vault-log.sh` aus buzz#11. Gespeichert wird der **SHA-256 des Payloads**, nicht der Payload — der Audit beweist, *was* freigegeben wurde, ohne Kundendaten zu duplizieren. Die Datei liegt außerhalb des (öffentlichen) Repos.
+
+### Beweisstand (2026-08-01)
+
+| Pfad | Beweis |
+|---|---|
+| Klassifikator | `gate.sh selftest` 14/14 — inkl. Fremdchat, fremder Absender, fehlende Gate-ID, fremde Gate-ID, Replay vor der Anfrage |
+| **Detektor kann rot werden** | 5 Mutanten, jeder von genau seinem Fixture gefangen: Chat-Prüfung raus → „Munir im Gruppenchat" FAIL · Absender raus → FAIL · Replay-Schutz raus → FAIL · Gate-ID-Prüfung raus → 2× FAIL · fail-closed getauscht → 2× FAIL |
+| Negativ live (Timeout) | `G-F2BD2B` an Munir zugestellt (TG msg 91), 60 s ohne Antwort → exit 11, **Zieldatei existiert nicht** |
+| Positiv (volle Verkettung) | `G-AC268E`: Anfrage → Poll → Freigabe (msg 4242) → **Kommando ausgeführt**, Audit `requested→approve→executed(exit 0)`. Transport gemockt, Nachrichtenbau/Klassifikator/Ausführung/Audit echt; der Mock liest die Gate-ID aus der echten Anfrage. |
+| Ablehnung | `G-4E2ABC`: exit 10, kein `executed`-Eintrag, Zieldatei fehlt |
+| Audit-Kette | 3 Live-Einträge verifiziert; nachträglich geänderter Eintrag → „KETTE GEBROCHEN bei Zeile 1", exit 1 |
+
+### Falle: UTF-8 stirbt in curls argv (Git Bash/MSYS)
+
+Ein langer, mehrzeiliger UTF-8-Body als `curl -d "$(...)"` kommt bei Telegram als `Bad Request: strings must be encoded in UTF-8` an — **dieselben Bytes über stdin (`--data-binary @-`) gehen durch**. Die MSYS-Argumentkonvertierung zerlegt die Multibyte-Sequenzen; kurze Strings überleben zufällig, lange nicht. Erst dadurch fiel es auf, dass die erste Gate-Anfrage nie ankam. Regel für jedes Skript hier: **JSON-Bodies immer über stdin an curl.**
+
+### Grenze, die nicht umgangen wird
+
+`buzz agents draft-update --system-prompt` ändert eine Persona **nicht** headless — es öffnet ein vorbefülltes Formular in Munirs Desktop. Persona-Änderungen sind plattformseitig owner-reviewed. Deshalb liegt die Agenten-Doktrin in `~/.buzz/AGENTS.md` (lesen alle fünf, headless erreichbar) statt in fünf System-Prompts.
