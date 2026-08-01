@@ -6,3 +6,9 @@
 # patches/*.patch with `\n`-joined patterns. Normalize to LF in the working
 # copy on every platform; the stored blobs are already LF.
 * text=auto eol=lf
+
+# Windows-Batch braucht CRLF: cmd.exe verschluckt sich an LF-only-Dateien
+# (gemessen 2026-08-01 — ein REM wurde zu einem Kommando "M"). Der eine
+# Ausloeser der Fuehrungsrituale darf daran nicht haengen.
+*.cmd text eol=crlf
+*.bat text eol=crlf
