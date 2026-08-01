@@ -345,3 +345,5 @@ obsidian-MCP bleibt der dokumentierte Fallback: nur `append_to_vault_file`, nie 
 | Kein Agenten-git | `git log ef7f07d..HEAD` im Vault: ausschließlich obsidian-git-Commits (`DESKTOP-LP3M6R0 <ts>`, 20-Minuten-Takt), kein Agenten-Commit, kein Push |
 | `mem` ist privat | `buzz mem ls`: `claude` → `mem/buzz-cli`, `Fizz` → nur `core` |
 | Fallback bewiesen | derselbe Append über `obsidian-mcp-tools/append_to_vault_file` (Local REST API v4.1.0, authenticated) |
+
+Kanonische Kopie des Scripts: `.empire/tools/vault-log.sh` — der Nest wird bei Buzz-Upgrades regeneriert, das Repo ist die Wiederherstellungsquelle (`cp .empire/tools/vault-log.sh ~/.buzz/vault-log.sh`).
