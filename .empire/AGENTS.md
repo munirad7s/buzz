@@ -209,6 +209,43 @@ Konsequenz: **ein Workflow mit `request_approval` schlägt fehl, statt zu warten
 
 Übernahmepfad: sobald WF-08 landet (oder wir es upstream beisteuern), wird `gate.sh` zum Adapter — Anfrage/Verdikt bleiben gleich, nur der Transport wechselt auf kind 46010. Folge-Ticket buzz#33.
 
+### WF-08 ist NICHT unsere Baustelle — und der native Pfad taugt heute nicht als Gate (gemessen 2026-08-01, buzz#33)
+
+Zwei Prämissen von buzz#33 sind gemessen widerlegt. Der Auftrag lautete „WF-08 bauen und upstream beisteuern"; beides ist falsch adressiert.
+
+**1. Upstream baut WF-08 längst — zweimal.** Vor jedem Zeilenschreiben gehört die Duplikat-Suche (`CONTRIBUTING.md`: „search open PRs and issues for duplicates … Duplicates may be closed with a pointer here"):
+
+| block/buzz | Art | Stand |
+|---|---|---|
+| **#2377** `feat(workflow): persist and resume approval gates (WF-08)` | PR, 5 Dateien, +447/−45 | offen seit 22.07. |
+| **#3327** `feat(workflow): implement WF-08 approval gates` | PR, 7 Dateien, +1347/−76 | offen seit 28.07. |
+| #2376 | Issue | Design + Implementierung WF-08 |
+| #3525 | Issue | „finalize_run drops the token instead of creating WaitingApproval" — **wortgleich unser eigener Befund**, schon vor uns gemeldet |
+| #2878 | Issue | `from:`-Syntax wird beim Approven abgelehnt, die funktionierende Syntax nimmt jeden Key |
+
+Ein dritter PR auf derselben (großen) Fläche wäre reines Duplikat. **Regel daraus: Duplikat-Suche im Upstream-Tracker ist Teil des Vorflug-Checks jedes Upstream-Tickets, nicht Kür.** Sie hat am 01.08. zweimal getroffen (hier und bei buzz#82).
+
+**2. Der native Pfad hätte unsere Gate-Doktrin gebrochen, nicht erfüllt.** `check_approver_spec` (`crates/buzz-relay/src/handlers/command_executor.rs:1004`) kennt exakt drei Fälle:
+
+| `approver_spec` | Wirkung |
+|---|---|
+| `""` oder `"any"` | **jeder authentifizierte User darf freigeben** |
+| 64-Zeichen-Hex-Pubkey | nur genau dieser Key |
+| alles andere (`@release-manager`, Rollen) | abgelehnt, fail-closed |
+
+Das Schema dokumentiert `from` aber als „User mention or role (e.g. `\"@release-manager\"`)" — also genau die Form, die der Relay **nie** akzeptiert. Wer WF-08 naiv verdrahtet, landet zwangsläufig bei `any`, und dann darf **jeder Agent in der Community seine eigene Anfrage freigeben**. Das ist das Gegenteil des Nicht-Ziels „nur Munir gibt frei, keine Agent-zu-Agent-Freigabe".
+
+PR #2377 löst genau das bereits richtig (`resolve_approver_spec`: `any` → `any`, Hex/`npub1…`/`@`-Präfix → exakter Hex-Key, Klarnamen-Mention → Fehler statt einer Approval, die niemand granten kann). Diese Fallunterscheidung stand in unserem Ticket nicht drin — wir hätten sie beim Bauen selbst finden müssen, vermutlich spät.
+
+**Schaltbedingung für `gate.sh` (bis dahin bleibt es der Sidecar).** Nicht „WF-08 ist gemerged", sondern alle vier Punkte gleichzeitig:
+
+1. WF-08 in `upstream/main` gemerged (heute: nein).
+2. `approver_spec` trägt Munirs **64-Zeichen-Hex-Pubkey**, nicht `any` — nachgelesen am persistierten Approval-Record, nicht an der Workflow-YAML.
+3. **Rot-Probe:** ein zweiter Key granted dieselbe Approval → abgelehnt. Ohne diesen Beweis ist der Transport nicht gate-tauglich, egal was das Schema sagt.
+4. Timeout/Ablehnung führen weiterhin zu **gar nichts** (fail-closed), Run läuft nicht weiter.
+
+Erst danach wird `gate.sh` Adapter. Bis dahin gilt: `gate.sh` ist keine Übergangslösung, die auf WF-08 wartet, sondern der einzige Pfad, der die Doktrin heute nachweislich hält.
+
 ### Wie das Gate funktioniert
 
 Anfrage = strukturierte Nachricht (Klasse · Aktion · Grund · **echter Payload** · Gate-ID) in Munirs privaten TG-Chat über den Bestands-Bot aus buzz#5. Verdikt = seine Antwort, die die zufällige Gate-ID nennt. `gate.sh run -- <kommando>` führt das Kommando **nur** bei Freigabe aus; Ablehnung (10) und Timeout (11) führen zu gar nichts.
@@ -1402,6 +1439,115 @@ Reihenfolge im Ablauf ist bindend: **erst die Vorwoche lesen, dann diese Woche s
 
 **Befund fürs Lagebild, nicht fürs Ritual:** owner-weit existiert genau **ein** offenes `ready`-P1-money. Ein Vorschlagsblock, der deshalb einzeilig bleibt, sieht aus wie ein Fehler — er wird sichtbar mit den ältesten `ready`-P1 aufgefüllt und die Herkunft je Zeile benannt (`[💶P1-money]` / `[P1]`). Aufgefüllt wird nur, nie ersetzt.
 
+---
+
+## buzz-acp-Testsuite auf Windows (buzz#83) — drei Ursachen, keine davon ein Produktionsfehler
+
+Ausgangslage: `cargo nextest run -p buzz-acp --no-fail-fast` → **9 rote Tests**, dauerhaft. Eine Suite, die immer rot ist, beweist nichts mehr — jeder Rust-Ticket-Agent musste vorher per `git stash` gegenmessen, ob *seine* Änderung die Ursache war.
+
+### Ursache 1 — `bash` ist auf Windows die WSL-Bash (7 der 9 Tests)
+
+Die Fixtures spawnen den **bloßen Namen** `"bash"`. Der wird über den **Windows**-`PATH` aufgelöst, und dort gewinnt `C:\Windows\System32\bash.exe` — der WSL-Starter — gegen Git Bash, **auch wenn der Testlauf selbst aus Git Bash kommt**. WSL führt das Script in der Distro aus und reicht die anonyme Pipe des Elternprozesses nie durch: jedes `read` bekommt sofort EOF, das Script antwortet nicht, der Client meldet `AgentExited`.
+
+Bewiesen, nicht vermutet — `uname -sr` aus dem Fixture heraus:
+
+```
+DIAG start uname=[Linux 6.6.87.2-microsoft-standard-WSL2] pwd=[/mnt/c/...]
+DIAG read1 rc=1 len=0
+```
+
+Fix: `test_shell()` löst deterministisch auf — `BUZZ_TEST_BASH` → Git-Bash-`EXEPATH` → bekannte Installationspfade. **Kein Fallback auf `"bash"`**: das wäre wieder WSL, und ein fehlender Toolchain-Fund soll als klarer Panic auffallen statt als rätselhaftes `AgentExited`.
+
+> Dieselbe Falle steckt latent in `crates/buzz-relay/src/api/git/policy.rs` und `crates/buzz-acp/src/pool.rs` — dort laufen die Scripts heute nur als `sleep 10`, brauchen also kein stdin und überleben WSL zufällig. Wer dort ein `read` ergänzt, fällt sofort hinein.
+
+### Ursache 2 — `Path::display()` in einem Shell-Script (die Müll-Dateien im Repo)
+
+`spawn_steer_capture_script` interpolierte den Capture-Pfad **unquoted** ins Script. Auf Windows liefert `display()` `C:\Users\…`, bash frisst die Backslashes als Escapes und schreibt eine Datei namens `C:UsersrescueAppDataLocalTemp…json` — ins **aktuelle Verzeichnis**, und das ist unter `cargo test` das Crate-Root. Genau daher kamen die fünf Fremdkörper in `crates/buzz-acp/`.
+
+Fix: `script_path()` (Backslash → Slash) plus einfache Anführungszeichen im Script. Danach landen die Captures wieder in `%TEMP%\buzz-acp-steer-capture\` und `git status` bleibt nach dem Lauf sauber.
+
+### Ursache 3 — Zeitfenster, die kleiner sind als der Windows-Prozess-Start
+
+`idle_resets_on_stdout_activity` und `keepalive_resets_idle_past_deadline` messen Idle-Fenster von 200 ms bzw. 100 ms, während ein echter Shell-Prozess die Zeilen liefert. Auf Windows ist **jedes `sleep` im Fixture ein Prozess-Start**. Gemessen während eines vollen 697-Test-Laufs: Abstand zweier Fixture-Zeilen **107 ms im Mittel, 194 ms im schlechtesten Fall** für ein nominelles `sleep 0.05` — die alten Fenster lagen *innerhalb* dieser Streuung. Deshalb liefen die Tests einzeln grün und unter Last rot.
+
+Drei Maßnahmen, jede mit Begründung:
+1. `spawn_script_ready()` — das Fixture sendet einen Ready-Marker, der Test startet seine Uhr erst danach. Vorher maß er den Shell-Start mit.
+2. `IDLE_WINDOW = 800 ms` (~4× über dem gemessenen Worst Case) und `$(seq …)` → `for ((…))`, das spart einen Prozess-Start je Test.
+3. `.config/nextest.toml`: `retries = 3` für die wanduhr-abhängigen Tests.
+
+**Zwei gemessene Sackgassen, damit sie niemand nochmal geht:**
+- *Fenster einfach weit genug aufziehen* nimmt den Tests die Fähigkeit, für eine echte Regression rot zu werden — die Zusicherung beweist dann nur noch, dass die Maschine nicht brennt.
+- *`threads-required = "num-test-threads"`* (Tests allein laufen lassen) machte es **schlimmer**: Suite-Laufzeit 18 s → 110 s und mehr Fehlschläge, weil sich die exklusiven Tests vorn stapeln und ihre `sleep 10`-Ausläufer den Lauf dominieren.
+
+Retries passen zu dem, was das ist: ein Scheduling-Artefakt, kein Defekt. Ein Test, der in irgendeinem Versuch grün wird, war ausgehungert; eine echte Regression fällt in allen vier Versuchen um.
+
+### ⚠️ Neue Worktree-Falle: geteiltes `CARGO_TARGET_DIR` serviert alte Binaries
+
+Um den Kompilier-Aufwand zu sparen, lief die Verifikation zuerst mit `CARGO_TARGET_DIR` auf das `target/` des Haupt-Checkouts. Zwei Läufe waren grün, der dritte meldete plötzlich **676 statt 697 Tests**, exakt die Fehler von *vor* dem Fix und die längst reparierten Müll-Dateien wieder im Baum: cargo hatte ein Artefakt des Haupt-Checkouts wiederverwendet. **Ein Worktree bekommt sein eigenes Target-Verzeichnis** — sonst misst man irgendwann den Stand eines anderen Branches und hält ihn für den eigenen.
+
+### Beweisstand (2026-08-01)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Ausgangslage `cargo nextest run -p buzz-acp --no-fail-fast` | 697 Tests, **9 failed** |
+| Nach Ursache 1 + 2 | **2 failed** (nur noch die Zeitfenster) |
+| Nach Ursache 3, eigenes Target-Verzeichnis | **697 passed, 0 failed** |
+| Wiederholbarkeit | drei aufeinanderfolgende Läufe grün (`1 flaky` = Retry gegriffen, kein Fehlschlag) |
+| `git status --short` nach dem Lauf | keine neuen untracked Dateien |
+| Rot-Probe | Fixture-Antwort verfälscht → **genau** der zugehörige Test rot, Rest grün |
+
+## Stille Fehler: die Muster, die am 2026-08-01 gefangen wurden
+
+Fünf Systeme waren an diesem Tag grün und taten nichts. Die folgenden Muster sind die dabei gemessenen Verallgemeinerungen — sie gelten für jedes neue Skript, jeden neuen Monitor, jede neue Zahl.
+
+### Ein Wrapper, der den Exit-Code verschluckt, macht jeden Detektor blind
+
+`ritual-task.cmd` meldete der Windows-Aufgabenplanung seit buzz#10 für **jeden** Ausgang Ergebnis `0`. Ursache war das abschließende Log-`echo` **innerhalb** der `bash -lc`-Zeichenkette: die letzte Anweisung bestimmt den Exit-Status der Shell.
+
+```bash
+bash -c "bash -c 'exit 3'; echo x"   # -> 0   (der echo gewinnt)
+bash -c "bash -c 'exit 3'"           # -> 3
+```
+
+Gemessen: `ritual.sh` gab `64` zurück (kein Brief erzeugt, nichts zugestellt), die `.cmd` gab `0` zurück. Alle drei Führungsrituale konnten also nie rot werden. Behoben in PR #98 — `rc` merken, loggen, weiterreichen; `0`/`1` bleiben grün („der Brief hat Munir erreicht"), ab `2` wird die Aufgabe rot.
+
+**Regel:** In jedem `.cmd`/`.ps1`/`.sh`-Wrapper den Exit-Code der Nutzlast **unmittelbar** sichern (`set "RC=%ERRORLEVEL%"` bzw. `rc=$?`) und am Ende weiterreichen. Kein Kommando zwischen Nutzlast und Sicherung — auch kein Log-`echo`. Vorbild im Haus: `google-mcp/scripts/token-probe-task.cmd`. Und danach die Rot-Probe: der Wrapper muss mit einem garantiert scheiternden Aufruf einen Nicht-Null-Code liefern, sonst ist der Fix unbewiesen.
+
+### Aus der n8n-Execution-Historie darf man „ist nie gelaufen" NICHT schließen
+
+`GET /executions?workflowId=…` meldete für drei aktive Wochen-Workflows null Executions. Alle drei waren gelaufen. Grund: n8n prunt nach **Anzahl** (Default `EXECUTIONS_DATA_PRUNE_MAX_COUNT=10000`, im Container ist keine `EXECUTIONS_*`-Variable gesetzt), und bei ~2 900 Executions/Tag reicht die Historie nur **3,4 Tage** zurück — kürzer als eine Wochen-Periode.
+
+```sql
+SELECT min("startedAt"), max("startedAt"), count(*) FROM execution_entity;
+-- 2026-07-29 06:34 | 2026-08-01 17:20 | 10175
+```
+
+Prune-feste Gegenquellen, die stattdessen zu benutzen sind:
+- **`workflow_statistics`** (Postgres, DB `n8n`): `count` + `latestEvent` je Workflow und Ereignistyp (`production_success`/`production_error`), überlebt jedes Pruning.
+- **Das fachliche Artefakt** des Workflows selbst — z. B. die Listmonk-Kampagne, die der Förder-Uhr-Digest jeden Montag anlegt (Kampagne id 9 belegte den Lauf am 2026-07-27 05:15).
+
+Ticket: adas-empire#85.
+
+### Ein Monitor ohne Benachrichtigung ist eine Kachel, kein Wächter
+
+Uptime-Kuma: `gobd-export` (id 55) ist aktiv und hat **null** zugeordnete Benachrichtigungen — als einziger von 51. Alle vier eingecheckten Provisionierungs-Skripte in `agency-infra` setzen `notificationIDList: {}`.
+
+```sql
+SELECT m.id, m.name,
+       (SELECT COUNT(*) FROM monitor_notification mn WHERE mn.monitor_id=m.id)
+FROM monitor m WHERE m.active=1 ORDER BY 3;
+```
+
+**Regel:** Nach jedem neuen Monitor diese Zählung laufen lassen; `0` ist ein Fehler. Und der Alarm gilt erst als bewiesen, wenn er einmal echt zugestellt wurde (Telegram-`message_id` **und** Gmail-Thread) — nicht, wenn er konfiguriert ist. Ticket: agency-infra#134.
+
+### Handwerk, das sonst falsche Funde erzeugt
+
+- **CRLF + Locale:** `gh`-Ausgaben tragen `\r`, und `comm` braucht `LC_ALL=C`. Ohne `tr -d '\r'` und `LC_ALL=C` meldete der Repo-Abgleich 22 statt 2 fehlende Repos — ein frei erfundener Fund.
+- **Der lokale Arbeitsbaum lügt:** `priorities.json` nannte lokal noch die Bounce-Adresse `munirdue@gmail.com`. Auf `origin/main` war sie längst korrigiert — der lokale Baum hing hinterher und trug zusätzlich fremde uncommittete Arbeit. **Vor jedem „das ist noch kaputt" gegen `origin/main` prüfen, nicht gegen den Baum.**
+- **Der Nenner darf nicht fehlen:** `lagebild.sh` bildet inzwischen die Vereinigung aus `priorities.json` und einer owner-weiten Label-Suche und meldet nicht gelistete Repos namentlich (buzz#61). Gegengeprüft: die Abdeckung stimmt. Ebenso vollständig ist die Kuma-Routenabdeckung — jeder Traefik-Host hat einen Monitor.
+
+---
+
 ## Empire-Cockpit im Desktop (buzz#15 — eigener `/empire`-Tab)
 
 **Entschieden: eigener Tab statt Pulse-Erweiterung.** Kriterium aus dem Ticket war die Größe des Upstream-Diffs. Pulse zu erweitern hätte `PulseScreen`/`PulseView`/`PulseTabBar` angefasst — alles Upstream-Dateien, die sich schnell bewegen (im selben Sync-Fenster kamen 7 Upstream-Commits, davon 5 in `desktop/src/features/messages`). Der eigene Tab ist additiv: **ein** neuer Feature-Ordner, **eine** neue Route, und an Upstream-Dateien nur vier Einzeiler (`routes.ts`, `preview-features.json`, Sidebar-Eintrag, zwei Handler-Zeilen in `lib.rs`). Pulse bleibt unberührt und funktionsfähig.
@@ -1437,7 +1583,7 @@ Dazu die Alters-Regel: ein Snapshot älter als 12 h behält seine Zahl, wird abe
 
 - **`lib.rs` stand exakt auf der 1000-Zeilen-Ratchet** (`desktop/scripts/check-file-sizes.mjs`: Dateien am Limit dürfen nicht wachsen). Zwei Handler-Zeilen kippen `pnpm check` — und zwar **jede** künftige Command-Registrierung, auch upstream. Hier gelöst durch das Zusammenziehen dreier zusammengehöriger Shutdown-Statements (2 Leerzeilen); die eigentliche Lösung ist ein Split von `lib.rs` → Gardener-Ticket.
 - **`routeTree.gen.ts` wird vom Vite-Plugin erzeugt, nicht von `tsc`.** `pnpm build` (= `tsc && vite build`) scheitert deshalb beim ersten Lauf mit einer neuen Route („'/empire' is not assignable to keyof FileRoutesByPath"): der Typcheck läuft, bevor der Generator lief. Reihenfolge: erst `pnpm exec vite build`, dann `pnpm typecheck`.
-- **Ein frischer Worktree hat keine Sidecars.** `cargo check` auf `desktop/src-tauri` stirbt in `build.rs` mit „resource path `binaries\buzz-acp-…exe` doesn't exist". Die `.exe`-Sidecars aus dem Haupt-Checkout **kopieren** (nicht junctionen — siehe die Junction-Lektion oben).
+- **Ein frischer Worktree hat keine Sidecars.** `cargo check` auf `desktop/src-tauri` stirbt in `build.rs` mit „resource path `binaries\buzz-acp-…exe` doesn't exist". Die `.exe`-Sidecars aus dem Haupt-Checkout **kopieren** (nicht junctionen — siehe die Junction-Lektion oben; und nicht `CARGO_TARGET_DIR` teilen — siehe buzz#83).
 - Der Sidebar-Eintrag navigiert selbst (`useNavigate`) statt über `onSelect…`-Props: der Prop-Weg hätte AppShell, AppSidebar, `useAppNavigation` **und** die geteilte `SidebarSelectedView`-Union angefasst — vier Upstream-Dateien für einen fork-eigenen Tab.
 
 ### Beweisstand (2026-08-01)
@@ -1447,7 +1593,8 @@ Dazu die Alters-Regel: ein Snapshot älter als 12 h behält seine Zahl, wird abe
 | Stichprobe Backlog | Script `ready`=44 / `blocked`=8 für `munirad7s/spontan` == unabhängige `gh issue list`-Abfrage, exakt |
 | Stichprobe Gates | `top_blocked[0]` = `agency-infra#7`, Labels `blocked-munir,P1-money`, `createdAt` identisch mit `gh issue view` |
 | Rot-Probe Sammler | ohne Quittungsdatei meldet der Ritual-Block „UNBEKANNT, ob Rituale liefen", Exit 1 — nicht „0" |
-| Rot-Probe UI | Dev-Instanz ohne `cockpit.json`: alle drei Snapshot-Kacheln „nicht erhoben" in Rot + Reparatur-Kommando; danach mit Snapshot echte Zahlen |
 | Rust-Unit | 8/8 (`empire_cockpit`) — fehlende/leere/kaputte/Array-JSON-Datei je eigener Test |
 | TS-Unit | 19/19 (`cockpitModel`) — inkl. „fehlendes Feld ist keine 0", „echte 0 darf 0 sagen", Schema-Mismatch, Staleness-Grenze |
 | Gates | `pnpm check` (desktop + web) ✅ · `pnpm typecheck` ✅ · `vite build` ✅ · `cargo fmt --all --check` ✅ · `cargo clippy` desktop-tauri ohne neue Warnung |
+
+**Offene Lücke, ehrlich benannt:** Der gerenderte Screenshot aus der laufenden App fehlt. Die isolierte Dev-Instanz baut und startet von diesem Branch (Onboarding-Screen belegt), aber eine **frische** Dev-Instanz landet im 7-Schritt-Onboarding — der Weg bis zum Tab war im Zeitbudget nicht zu Ende zu gehen. Wer ihn geht: `~/.buzz-dev` ist der Nest der Dev-Instanz, dort müssen `cockpit.json` und `cockpit-snapshot.sh` liegen; ohne `cockpit.json` ist die Rot-Probe geschenkt.
