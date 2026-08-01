@@ -227,3 +227,63 @@ Exit-Codes beantworten nur die **Erhebung**, nie die Lage: `0` vollständig · `
 | Kanal-Rot-Probe | mit kaputtem Bot-Token liefert derselbe Pfad `isError: true` statt einer stillen Erfolgsmeldung |
 
 **Offene Lücke (ehrlich benannt, nicht behoben):** Der im Ticket geforderte Beweis „@dispatcher Lage?" **im Buzz-Kanal** steht aus — beim Bau lief kein Relay (`localhost:3000` tot) und es existiert keine Dispatcher-Persona (das ist buzz#3, weiter offen). Der E2E-Beweis wurde deshalb über den Kanal geführt, der heute wirklich läuft (Telegram via `telegram-mcp`). Sobald #3 steht, ist der Buzz-Kanal-Lauf ein Einzeiler: Trigger-Wörter und Aufruf stehen bereits in `~/.buzz/AGENTS.md`.
+
+## Codex-Harness auf Munirs ChatGPT-Abo (buzz#18 — config-only, kein Fork-Code)
+
+**Befund: Der Abo-Weg ist vollständig verdrahtet und serverseitig bestätigt. Blockiert ist heute allein das Kontingent, nicht die Auth.**
+
+Der Buzz-eigene `buzz-agent` kann kein ChatGPT-Abo (`crates/buzz-acp/README.md`: OpenAI-Provider braucht API-Key). Das Abo trägt ausschließlich über den **Codex-HARNESS**: Buzz spricht ACP mit dem Adapter `@agentclientprotocol/codex-acp`, der wiederum die Codex-Engine startet, und die authentifiziert sich per OAuth gegen Munirs ChatGPT-Konto.
+
+### Auth-Kette (gemessen 2026-08-01, jede Stufe einzeln belegt)
+
+| Stufe | Was läuft | Beleg |
+|---|---|---|
+| Agent | `codex` (Runtime `codex`, Modell `gpt-5.6-sol`, `respond_to: owner-only`) | Agent-Record in `%APPDATA%\xyz.block.buzz.app\agents\managed-agents.json` |
+| Transport | `buzz-acp.exe` ↔ Relay `wss://…communities.buzz.xyz`, Agent-Pool 10 | Agent-Log: `connected to relay`, `agent_pool_ready agents=10` |
+| Adapter | `@agentclientprotocol/codex-acp` **1.1.7** (aktuellste npm-Version) | ACP-`initialize`: `agentInfo.name`/`version` |
+| Engine | gebündeltes `@openai/codex` 0.145.0 im Adapter (unabhängig von der CLI 0.146.0 auf der Maschine) | `package.json` des Adapters |
+| Auth | `auth_mode = "chatgpt"`, `OPENAI_API_KEY = null`, OAuth-Tokens vorhanden | `~/.codex/auth.json` (nur Schlüssel gelesen, nie Werte) |
+
+**Wo der Adapter liegt — nicht in den globalen npm-Prefix schauen:** Buzz installiert seine Node-Werkzeuge nach `%APPDATA%\Buzz\node-tools\` (`managed_node_paths.rs`) und startet `…\node-tools\codex-acp.cmd`. `which codex-acp` in der Shell liefert deshalb **nichts**, obwohl der Adapter installiert und in Benutzung ist. Kein globales `npm install -g` nötig — und damit auch keine Volta-Stale-Falle.
+
+### Beweis, dass KEIN API-Key im Spiel ist (vier unabhängige Schichten)
+
+1. `~/.codex/auth.json`: `OPENAI_API_KEY = null`, `auth_mode = "chatgpt"`.
+2. Windows-Env: `OPENAI_API_KEY` ist in **Process**, **User** und **Machine** leer; kein einziges `*OPENAI*`/`*CODEX*`-Env-Var gesetzt.
+3. Buzz injiziert nichts: `agents/global-agent-config.json` hat `env_vars: {}`, der Agent-Record keine Env-Overrides.
+4. `~/.codex/config.toml` enthält **keinen** `model_providers`-Block, kein `env_key`, kein `api_key`, keine `base_url`.
+
+**Der stärkste Beleg kommt vom Server, nicht von der Konfiguration** (Detektor, der rot werden kann): ein Prompt mit `-m gpt-5.6-codex-mini` wird mit
+`400 invalid_request_error: The 'gpt-5.6-codex-mini' model is not supported when using Codex with a ChatGPT account.`
+abgelehnt. Diese Fehlermeldung existiert auf dem API-Key-Pfad nicht — OpenAI selbst bestätigt damit, dass die Anfrage aus einem **ChatGPT-Konto** kam.
+
+### Der echte Blocker: Abo-Kontingent erschöpft (nicht die Auth)
+
+`session/new` gelingt, der Adapter liefert die Modellliste (`gpt-5.6-sol[low|medium|high]` …) — erst `session/prompt` scheitert. Was `buzz-acp` als nichtssagendes `Agent reported error (code -32603): Internal error` protokolliert, ist im ACP-Rohantwort-Feld `data` eindeutig:
+
+```json
+{"code":-32603,"message":"Internal error",
+ "data":{"message":"You've hit your usage limit. … or try again at Aug 8th, 2026 9:14 AM.",
+         "codexErrorInfo":"usageLimitExceeded"}}
+```
+
+Konsequenz: Der Kanal-Beweis („codex beantwortet eine echte Aufgabe in #build") ist **bis zum Kontingent-Reset am 2026-08-08 09:14 nicht führbar** — ohne Zukauf von Credits bzw. Pro-Upgrade. Nach Doktrin wurde **kein API-Key-Fallback** aktiviert. `buzz-acp` requeued den Auftrag mit Backoff (bis `attempt=10`) und gibt dann auf; die Nachricht geht verloren, der Agent bleibt gesund (`pipe intact`, kein Respawn).
+
+**Diagnose-Rezept für „-32603 Internal error"** (buzz-acp verschluckt das `data`-Feld): Adapter direkt über stdio ansprechen — newline-delimited JSON-RPC, `initialize` → `session/new` (`{cwd, mcpServers: []}`) → `session/prompt`. Die volle Fehlerursache steht in `error.data.codexErrorInfo`.
+
+### Betrieb: Erneuerung, Logout, Wiederanlauf
+
+- **Erneuerung läuft automatisch.** Die Codex-Engine refresht das OAuth-Token selbst und schreibt `last_refresh` in `~/.codex/auth.json` zurück. Nichts zu tun, solange `codex login status` „Logged in using ChatGPT" sagt.
+- **Nach einem Logout / bei `Not logged in`:** `codex login` in Git Bash ausführen (Browser-Flow auf `localhost:1455`, headless notfalls Device-Code). Der Login gehört Munirs Account — der finale Klick ist nicht delegierbar. Danach den codex-Agenten im Desktop stoppen/starten, damit der Adapter-Pool die Datei neu liest.
+- **Login-Weg über die UI:** Der Desktop rendert die vom Adapter gemeldeten Auth-Methoden (`api-key`, `chat-gpt`) als Menü und führt nur adapter-gelieferte Kommandos aus (`commands/agent_auth.rs` — „Buzz never guesses vendor login commands"). Runtime-Metadaten in `managed_agents/discovery.rs`: Login-Hinweis `codex login`, Auth-Probe `codex login status`, Adapter-Install `npm install -g @agentclientprotocol/codex-acp`.
+- **Nie in Repo/Issues:** `~/.codex/auth.json`, `CODEX_HOME`-Inhalte, `config.toml` (enthält fremde MCP-Keys).
+
+### Kosten-Routing (Stand heute)
+
+| Strang | Harness | Kostenstelle |
+|---|---|---|
+| Builder/Reviews `codex` | codex-acp → ChatGPT-Abo-OAuth | bezahltes Abo, keine API-Kosten — **aber Wochenkontingent teilt er sich mit Munirs interaktiven Codex-Sessions** |
+| `claude` | claude-agent-acp → Claude-Abo | bezahltes Abo |
+| `buzz-agent` (nativ) | eigene Provider-Keys | API-Kosten — für den Abo-Weg irrelevant |
+
+Die geteilte Wochenquote ist der eigentliche Fund dieses Tickets: Ein Codex-Worker-Strang ist nur so belastbar wie das, was Munirs eigene Sessions übriglassen.
