@@ -187,6 +187,38 @@ Die Bedarfsanalyse war die Arbeit, nicht das Klicken der Rolle. Ergebnis über *
 | `[E2E] funnel-probe` (erzwungene Execution `141536`) | success — Lead über den Live-Funnel angelegt, `CL Delete Lead` ok, `CL Delete TP` ok, Kuma-Up gepingt |
 | ACL-Wächter (#28) gegen den neuen Snapshot | grün, 3/3 User |
 
+### CRM-Löschungen im Gate-Batch (buzz#79 — „gehärtet" ist erst dann „bewiesen sauber")
+
+Nach #29/#52/#53 kann kein API-User mehr fremde Datensätze löschen. „Kann nicht" ist aber eine Annahme, solange niemand hinsieht — und Espo löscht **soft**: ein gelöschter Lead ist für jeden Lesepfad 404, der Grabstein bleibt liegen. Eine stille Löschwelle senkt KPI-Zahlen und Brief-Vorrat, ohne dass irgendwo etwas rot wird. Seit #79 steht **jeden Abend eine Zeile im Gate-Batch**.
+
+**Quellenwahl (drei Kandidaten gemessen, nicht geraten):**
+
+| Quelle | Kann | Kann nicht | Urteil |
+|---|---|---|---|
+| Access-Log des Containers | vollständig, jede DELETE-Zeile | keine Entity-Identität, kein User | verworfen |
+| Grabstein `deleted: true` | identitätsgenau | kein Urheber, kein verlässlicher Löschzeitpunkt (Espo fasst `modified_at` beim Remove nicht an) | verworfen |
+| `action_history_record` | `user_id` + `action` + `target_type` + `target_id` + `created_at` | über die **Espo-API** nur `read: own` → als Wächter wertlos | **gewählt — aber über die DB gelesen** |
+
+Entscheidend: `action_history_record` **read-only über den bestehenden ssh-Pfad** (`docker exec agency-crm-mariadb`) braucht **keinen neuen Espo-User und keine Rechteerweiterung** — genau die Bedingung, die #52/#53 gesetzt haben. Ein Admin-API-Key hätte alles kaputt gemacht, was diese Ticket-Reihe abgebaut hat.
+
+**Schwelle aus 8 Tagen Historie gemessen, nicht gesetzt:** 26.07.–31.07. löschte täglich genau `n8n-agent` **1× Lead + 1× CTouchpoint** (der Funnel-Probe aus #53) — sonst nichts. Alles darüber und jeder andere User ist erklärungsbedürftig und wird namentlich mit Entity und Anzahl aufgeführt.
+
+**0 ist kein Ruhezustand.** Bei 0 Löschungen meldet die Zeile ausdrücklich, dass auch der Funnel-Probe nichts gelöscht hat, und nennt den Zeitpunkt der letzten Löschung überhaupt — sonst sähe ein toter Probe-Workflow wie ein sauberer Tag aus.
+
+**Zeitrahmen:** Espo schreibt `created_at` in UTC, der MariaDB-Container läuft in UTC (gemessen: `NOW() == UTC_TIMESTAMP()`). `NOW() - INTERVAL n HOUR` ist damit derselbe Rahmen wie die Daten. Über `RITUAL_CRM_OFFSET_H` lässt sich jedes vergangene Fenster nachschlagen („was wurde vorgestern gelöscht"), über `RITUAL_CRM_WINDOW_H` seine Länge, über `RITUAL_CRM_CONTAINER` der Ausfall proben.
+
+**Gemessene Falle:** Die erste Fassung schrieb im Gutfall die feste Formel „(n8n-agent, 1× Lead + 1× CTouchpoint)". Bei genau einem gelöschten Lead behauptete der Führungsbrief damit einen CTouchpoint, den es nicht gab — eine erfundene Zahl, gemessen am 01.08. gefangen. Die Zusammensetzung wird jetzt aus den Zeilen gerechnet. **Regel: auch der Gutfall wird gemessen, nicht formuliert.**
+
+**Beweisstand (2026-08-01, alle am laufenden System):**
+
+| # | Probe | Ergebnis |
+|---|---|---|
+| 1 | Ruhetag (24 h endend vor 48 h = 31.07.) | `✅ 2 Löschungen — ausschließlich der Funnel-Probe (n8n-agent): 1× Lead, 1× CTouchpoint. Erwartet.` |
+| 2 | Ausschlag (letzte 24 h, Ticket-Tag) | `⚠️ 61 Löschungen, davon 59 außerhalb des Funnel-Probes` + Aufschlüsselung je User |
+| 3 | Detektor rot→grün | 3-h-Fenster meldete `0 Löschungen`; danach Wegwerf-Lead über `n8n-agent` (`delete: own`) angelegt **und gelöscht** (HTTP 200 / GET danach 404); **dasselbe** 3-h-Fenster meldete `1 Löschung … 1× Lead` |
+| 4 | Quelle tot | `RITUAL_CRM_CONTAINER=gibtsnicht` → `⚠️ LÜCKE — die Löschspur wurde NICHT erhoben. Das ist kein "0 Löschungen"`, Grund benannt, Exit 1 |
+| 5 | Kein neuer Zugang | ACL-Wächter (#28) nach der Arbeit: `OK buzz-agent / OK claude-mcp-admin / OK n8n-agent`, Exit 0 |
+
 ## Approval-Gate (buzz#9 — kein Outbound ohne Freigabe)
 
 Doktrin: `.empire/POLICY.md` (drei Klassen FREI · GATED · VERBOTEN). Werkzeug: `.empire/gate.sh`. Agenten-Kurzfassung liegt in `~/.buzz/AGENTS.md` und erreicht damit alle fünf Nest-Agenten (Bumble, claude, codex, Fizz, Honey).
