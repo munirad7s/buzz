@@ -23,6 +23,22 @@ set "GITBASH=C:\Program Files\Git\bin\bash.exe"
 if not exist "%GITBASH%" set "GITBASH=%ProgramFiles%\Git\bin\bash.exe"
 if not exist "%GITBASH%" (echo Git Bash nicht gefunden & exit /b 2)
 
+REM Exit-Code-Weitergabe (Rot-Probe 2026-08-01): das abschliessende `echo` IN der
+REM bash-Zeichenkette wurde zum Exit-Status der Shell — `bash -lc "false; echo x"`
+REM liefert 0. Die Aufgabenplanung meldete deshalb fuer JEDEN Ausgang Ergebnis 0,
+REM auch fuer Ergebnis 64 (kein Brief) und Ergebnis 3 (Transport gescheitert).
+REM Gemessen: ritual.sh gab 64 zurueck, die .cmd 0. Ein Detektor, der nicht rot
+REM werden kann, ist kein Detektor. Deshalb: rc merken, loggen, weiterreichen.
 set "HERE=%~dp0"
-"%GITBASH%" -lc "mkdir -p ~/.buzz; echo \"=== $(date -Is) ritual %~1 ===\" >> ~/.buzz/ritual.log; bash '%HERE:\=/%ritual.sh' %~1 --post --telegram --vault >> ~/.buzz/ritual.log 2>&1; echo \"exit=$?\" >> ~/.buzz/ritual.log"
-exit /b %ERRORLEVEL%
+"%GITBASH%" -lc "mkdir -p ~/.buzz; echo \"=== $(date -Is) ritual %~1 ===\" >> ~/.buzz/ritual.log; bash '%HERE:\=/%ritual.sh' %~1 --post --telegram --vault >> ~/.buzz/ritual.log 2>&1; rc=$?; echo \"exit=$rc\" >> ~/.buzz/ritual.log; exit $rc"
+set "RC=%ERRORLEVEL%"
+
+REM ritual.sh: 0 = alle Quellen geliefert · 1 = Brief zugestellt, mit benannten
+REM Luecken · 2 = kein Brief · 3 = Transport gescheitert · 64 = Usage.
+REM 0 und 1 heissen beide "der Brief hat Munir erreicht" -> gruen. Alles ab 2
+REM heisst "er hat ihn NICHT erreicht" -> muss rot sein. Wuerde auch 1 rot
+REM melden, waere die Aufgabe an praktisch jedem Tag rot (Luecken sind der
+REM Normalfall) und niemand schaute mehr hin.
+if "%RC%"=="0" exit /b 0
+if "%RC%"=="1" exit /b 0
+exit /b %RC%
