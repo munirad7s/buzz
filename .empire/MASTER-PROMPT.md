@@ -64,12 +64,15 @@ rtk gh issue comment <nr> -R munirad7s/buzz -b "🐝 buzz_empire $(date '+%Y-%m-
 
 ### Schritt 5 — Liefern
 ```bash
-git checkout -b feat/<issue-nr>-<slug>
+git -C C:/Users/rescue/projects/buzz worktree add ../buzz-agent-<nr> -b feat/<issue-nr>-<slug>
+cd C:/Users/rescue/projects/buzz-agent-<nr>
 rtk git add -A && rtk git commit -m "<warum> (#<nr>)"
 git push -u origin feat/<issue-nr>-<slug>
 rtk gh pr create --repo munirad7s/buzz --base main --head feat/<issue-nr>-<slug> --fill
 rtk gh pr merge <pr-nr> -R munirad7s/buzz --squash --delete-branch
+git -C C:/Users/rescue/projects/buzz worktree remove ../buzz-agent-<nr>
 ```
+⚠️ **Ein Worktree pro Agent — der geteilte Haupt-Tree wird in einer Welle nie für `checkout -b` benutzt** (Lesen bleibt erlaubt). Gemessen am 01.08. in der 5-Agenten-Welle: der `checkout -b` eines fremden Agenten zieht dem eigenen den HEAD weg, danach steht man ohne eigenes Zutun im fremden Branch; mit unfertiger Arbeit im Tree bricht der eigene `git checkout` mit `Aborting` ab und HEAD bleibt fremd — zwei Befehle früher hätte `git add -A && commit` fremde Arbeit mitgenommen. Worktrees haben eigenen HEAD und Index. Geht kein Worktree (Welle läuft schon im Tree), liefere über die GitHub-API: Branch aus `main` (`POST /repos/{o}/{r}/git/refs`), Datei-Commits via `PUT /repos/{o}/{r}/contents/{path}` mit `branch` + `sha`, dann PR — das fasst den geteilten Tree gar nicht an. Bei `.empire/AGENTS.md` und anderen geteilten Dateien: Basis IMMER frisch von `main` ziehen und nur die eigene Sektion anhängen.
 ⚠️ **`gh pr create --fill` ohne `--repo` zielt in einem Fork auf UPSTREAM** (`block/buzz`) — die Falle ist am 01.08. einmal zugeschnappt (block/buzz#4095, sofort geschlossen). `--repo`/`-R` ist deshalb Pflicht, bei `create` UND bei `merge`. Passiert es doch: `rtk gh pr close <nr> -R block/buzz -c "<kurze Entschuldigung>"`, dann korrekt neu aufmachen.
 
 ### Schritt 6 — Abschließen
@@ -98,3 +101,4 @@ Trägt das Issue schon `blocked-munir` → KEINE neue Mail. Danach sofort nächs
 1. Vault-Tagesnotiz: 3–8 Bullets (Tickets, Merges, Blocker) — Präfix `🐝 buzz_empire:`.
 2. `.empire/PROGRESS.md`: 1 Zeile `YYYY-MM-DD HH:MM | <n> Tickets | <nrn> | <Blocker>`.
 3. Meilenstein mit Now.md-Relevanz (Voice läuft, Relay live, Rituale echt) → Abschnitt „Empire-Loop" in `99 System/Now.md` ergänzen.
+4. Eigene Worktrees abräumen: `git -C C:/Users/rescue/projects/buzz worktree remove ../buzz-agent-<nr>` (notfalls `--force`), dann `worktree prune`. `git worktree list` darf keinen verwaisten Eintrag des eigenen Tickets zeigen — fremde Einträge laufender Agenten NICHT anfassen.
