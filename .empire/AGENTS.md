@@ -1277,3 +1277,23 @@ Zweite, harmlosere Falle: die `.cmd`-Startrampe schreibt echtes UTF-8 ins Log; `
 | Live über den Nest | `mcp-call.mjs --server google-mcp --tool calendar_events` → 12 Kalender, 30 Termine, 0 unlesbar |
 | Brief echt | Block „2) Termine heute" mit 20 realen Terminen, ganztägig zuerst, Uhrzeit + Ort |
 | **Detektor rot (Brief)** | MCP-Config verbogen → „⚠️ LÜCKE — Kalender nicht erhoben (siehe Block 6)" und die Ursache namentlich in Block 6 — **nicht** „keine Termine" |
+
+## ⚠️ Worktree-Falle: `node_modules` NIE als Junction in einen Worktree hängen
+
+**Gemessen am 2026-08-01, zweimal zugeschnappt, beide Male an einem produktiven MCP-Server.**
+
+Ein `git worktree` eines Node-Repos hat keine `node_modules`. Die naheliegende Abkürzung — eine Windows-Junction auf die des Haupt-Checkouts statt eines zweiten `npm install` — ist ein Selbstschuss:
+
+```
+New-Item -ItemType Junction -Path <worktree>\node_modules -Target <repo>\node_modules   # NICHT TUN
+git worktree remove <worktree> --force                                                  # löscht DURCH die Junction
+```
+
+`git worktree remove --force` (und `rmdir /s /q`) folgen der Junction und räumen den **Zielordner** aus. Ergebnis: der Haupt-Checkout verliert seine Abhängigkeiten, und zwar **still** — der Ordner sieht noch bevölkert aus.
+
+Der Ausfall ist nicht theoretisch: `espo-mcp` behielt 97 Paket-Ordner, aber `node_modules/.bin` war **leer** → `tsx` nicht mehr auffindbar → `mcp-call: Handshake mit 'espo-mcp' fehlgeschlagen: Connection closed`. Bei `google-mcp` traf es den ganzen Ordner. Beide MCP-Server im Nest waren damit tot, während Repo und PRs tadellos aussahen — **kein Test schlägt an, weil der Code stimmt.**
+
+**Regeln:**
+- Im Worktree ein eigenes `npm install` fahren. Es kostet Sekunden, die Reparatur kostet mehr.
+- Muss es doch eine Junction sein: **vor** dem Entfernen des Worktrees `cmd /c rmdir <worktree>\node_modules` (das *entfernt die Verknüpfung*, ohne dem Ziel zu folgen) — erst danach `git worktree remove`.
+- Nach dem Abräumen eines Worktrees die betroffenen Live-Server einmal wirklich ansprechen (`mcp-call.mjs --server <name> --list`), nicht nur `git status` lesen. Ein grüner Merge sagt nichts über einen laufenden Server.
