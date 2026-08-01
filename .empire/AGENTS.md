@@ -663,7 +663,7 @@ Begründung: Ein Workflow kann ausschließlich `send_message`. Der Bestand vom 3
 | `workflows runs --workflow <id>` | liefert `[]` — **auch nach einem nachweislich erfolgreichen manuellen Trigger** (`run_id` in der Antwort, Nachricht im Kanal). Die Run-Liste ist also KEIN Beweismittel; wer daraus „nie gelaufen" schließt, misst das falsche Ding |
 | Direkte Probe | Workflow auf eine Zielminute 3 min in der Zukunft gesetzt (`accepted: true`), 6 min gepollt → **keine Nachricht**; danach sauber zurückgesetzt und der Revert verifiziert |
 
-Der Relay ist gehostet (`adaswin.communities.buzz.xyz`, `/health` = ok) — die Ursache liegt serverseitig und ist von hier nicht reparierbar (Kandidaten im Code: `check_owner_authority`, `list_all_enabled_workflows`). **Konsequenz: der tatsächliche Auslöser ist die Windows-Aufgabenplanung, die Buzz-Workflows bleiben als Kanal-Definition bestehen und greifen automatisch, sobald der Relay-Scheduler wieder feuert.** Beides zeigt auf dasselbe Kommando — kein Doppelbau, aber auch kein Ritual, das an einem kaputten Scheduler hängt. Folge-Ticket: buzz#55.
+Der Relay ist gehostet (`adaswin.communities.buzz.xyz`, `/health` = ok) — die Ursache liegt serverseitig und ist von hier nicht reparierbar (Kandidaten im Code: `check_owner_authority`, `list_all_enabled_workflows`). **Konsequenz: der tatsächliche Auslöser ist die Windows-Aufgabenplanung, die Buzz-Workflows bleiben als Kanal-Definition bestehen und greifen automatisch, sobald der Relay-Scheduler wieder feuert.** Beides zeigt auf dasselbe Kommando — kein Doppelbau, aber auch kein Ritual, das an einem kaputten Scheduler hängt. Folge-Ticket: buzz#60.
 
 **Nebeneffekt: das DST-Problem ist damit weg.** Die Aufgabenplanung rechnet in Ortszeit, 08:45 bleibt 08:45 — auch nach dem 25.10.2026. Die UTC-Crons in den Workflows tragen den Umstellungshinweis trotzdem in der `description` (`45 6` → `45 7`, `45 18` → `45 19`), damit sie beim Wiederanlaufen des Relay-Schedulers nicht eine Stunde daneben feuern.
 
@@ -695,7 +695,7 @@ Exit-Codes beantworten nur die Erhebung: `0` vollständig · `1` mit benannten L
 
 ### Gemessene Falle: die Repo-Liste war still unvollständig
 
-`priorities.json` ist eine gepflegte Liste und hinkt neuen Repos hinterher: 82 blocked-munir aus der Liste gegen 83 laut owner-weiter Suche — `munirad7s/agency-handoff` fehlte. Das Script bildet deshalb die **Vereinigung** aus Liste und Suchtreffern und fragt danach je Repo exakt ab (Suche allein truncatet still). Dass das Lagebild aus buzz#7 dieselbe Liste benutzt, macht seine Backlog-Zahlen um dasselbe Repo zu klein → Folge-Ticket buzz#56.
+`priorities.json` ist eine gepflegte Liste und hinkt neuen Repos hinterher: 82 blocked-munir aus der Liste gegen 83 laut owner-weiter Suche — `munirad7s/agency-handoff` fehlte. Das Script bildet deshalb die **Vereinigung** aus Liste und Suchtreffern und fragt danach je Repo exakt ab (Suche allein truncatet still). Dass das Lagebild aus buzz#7 dieselbe Liste benutzt, macht seine Backlog-Zahlen um dasselbe Repo zu klein → Folge-Ticket buzz#61.
 
 ### Werkzeug-Fallen, die hier abgeräumt sind
 
@@ -718,7 +718,7 @@ Exit-Codes beantworten nur die Erhebung: `0` vollständig · `1` mit benannten L
 | Vault-Tagesnotiz | je Ritual eine Zeile über `~/.buzz/vault-log.sh` (buzz#11) |
 | Scheduler | Windows-Aufgaben `Buzz-Ritual-Morgenbrief` / `Buzz-Ritual-Gate-Batch`, Timing durch vorgezogenen Trigger live bewiesen |
 
-**Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector). Er steht als benannte Lücke im Brief — nicht weggelassen. Folge-Ticket buzz#57.
+**Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector). Er steht als benannte Lücke im Brief — nicht weggelassen. Folge-Ticket buzz#62. Drittes Ritual (Wochen-Review So 18:00): buzz#63.
 
 ## ⚖️-Marker werden Entscheidungs-Entwürfe (buzz#42 — `.empire/tools/decision-drafts.sh`)
 
@@ -756,3 +756,59 @@ Ein naives `grep "⚖️ Decision-Kandidat:"` fängt **jede Zeile, die den Marke
 | **Live am echten Vault** | `collect --days 7` → 1 echter Marker → `08 Decisions/gmail-send-nicht-ergaenzt.md` (`D-844DC1DE`, `draft`); `ask` → Telegram msg **105** |
 
 **Offen:** Der letzte Schritt (`ingest` mit Munirs echter Antwort) steht aus — er hängt an ihm, nicht am Code. Sobald er antwortet: `bash .empire/tools/decision-drafts.sh ingest`.
+
+### Workflow-Quellen (Export 2026-08-01, Kanal `#general` `96067fa5-…`)
+
+Beide Workflows sind editiert, nicht dupliziert (`workflows delete` wird angenommen, löscht aber nicht — Neutralisieren geht nur über `enabled: false`). Owner ist der Agent-Pubkey `78be5e27…`; NIP-33-Ersetzung funktioniert nur mit demselben Schlüssel, deshalb muss `buzzx.sh --key agent:<pubkey>` verwendet werden.
+
+```yaml
+# 88c25e55-c928-4651-83a5-9be86a2d89f3
+name: Daily Morning Brief
+description: "08:45 Europe/Berlin. Cron laeuft UTC (timezone-Feld wird still ignoriert): 45 6 = 08:45 CEST;
+  ab Winterzeit 25.10.2026 auf 45 7 aendern. Inhalt kommt aus .empire/tools/ritual.sh (gemessen), nicht aus
+  Modellwissen. Achtung: der Relay-Scheduler feuert diesen Workflow Stand 2026-08-01 NICHT (gemessen, buzz#10)
+  - der echte Ausloeser ist die Windows-Aufgabe Buzz-Ritual-Morgenbrief."
+enabled: true
+trigger:
+  on: schedule
+  cron: "45 6 * * *"
+steps:
+  - id: ask_claude
+    action: send_message
+    text: |
+      @claude MORGENBRIEF 08:45 (Europe/Berlin).
+      Fuehre GENAU dieses Kommando aus und poste nichts anderes:
+        bash C:/Users/rescue/projects/buzz/.empire/tools/ritual.sh morgenbrief --post --telegram --vault
+      … (Regeln: keine Zahl erfinden, keine Luecke aus dem Gedaechtnis fuellen,
+          bei Exit 2/3 den Exit-Code melden statt einen Ersatzbrief zu posten)
+
+# 857d07e7-385a-4eff-8163-a7476dc6af16
+name: Daily Munir Gate Batch
+description: "20:45 Europe/Berlin. Cron laeuft UTC: 45 18 = 20:45 CEST; ab Winterzeit 25.10.2026 auf 45 19
+  aendern. … der echte Ausloeser ist die Windows-Aufgabe Buzz-Ritual-Gate-Batch."
+enabled: true
+trigger:
+  on: schedule
+  cron: "45 18 * * *"
+steps:
+  - id: ask_claude
+    action: send_message
+    text: |
+      @claude ABEND-GATE-BATCH 20:45 (Europe/Berlin).
+        bash C:/Users/rescue/projects/buzz/.empire/tools/ritual.sh gate-batch --post --telegram --vault
+      … (Ist die Liste leer, obwohl Repos unlesbar waren, sagt das Script das
+          selbst — nicht in "heute nichts zu tun" umdeuten)
+```
+
+Der 30.07. hinterlässt zusätzlich `6fa01e2b-…` (`daily-briefing`) mit `enabled: false` — nicht löschbar, bewusst als Grabstein stehen gelassen. Diente in buzz#10 als Scheduler-Sonde, weil ihr Text (`deaktiviert`) keinen Agenten weckt.
+
+### DST — warum hier nichts bricht
+
+| Ebene | Zeitbasis | Umstellung 25.10.2026 |
+|---|---|---|
+| Windows-Aufgabenplanung (**produktiver Auslöser**) | Ortszeit | nichts zu tun — 08:45 bleibt 08:45 |
+| Buzz-Workflow-Cron (Reserve) | UTC, `timezone` wird still ignoriert | `45 6` → `45 7`, `45 18` → `45 19`; Hinweis steht in der `description` |
+
+### Falle: MSYS zerlegt Windows-Optionen
+
+`schtasks /Query` wird von Git Bash zu `schtasks C:/Program Files/Git/Query` — **jeder** schtasks-Aufruf scheitert, und wer die Ausgabe wegwirft, hält den Fehlschlag für Erfolg. `MSYS_NO_PATHCONV=1` setzen (oder `//Query` schreiben). Gehört zur selben Familie wie die UTF-8-argv-Falle: unter MSYS ist jedes Argument, das mit `/` beginnt oder Multibytes enthält, verdächtig.
