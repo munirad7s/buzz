@@ -6,3 +6,4 @@
 2026-08-01 14:10 | 1 Ticket | #9 Approval-Gate (POLICY.md + gate.sh + Audit-Kette, PR #31); Folge-Tickets #32/#33 | Blocker: keine
 2026-08-01 14:17 | 1 Ticket | #11 Vault-Protokoll (Nest-Doktrin + vault-log.sh, E2E claude+Fizz) | Blocker: keine
 2026-08-01 14:35 | 1 Ticket | #2 Eigener Buzz-Relay live (buzz.adas.casa, Traefik/LE, Scheduler-Beweis 4x@60s, Backup-Block 5e, Kuma-Monitor) | Blocker: keine
+2026-08-01 14:55 | 1 Ticket | #1 Fork-Baseline Windows (5 Sidecars + NSIS Buzz_0.5.3_x64-setup.exe, 693 Unit-Tests grün, .empire/BUILD.md, Sync-Ritual gefahren) | Befund: Hermit auf Windows tot, desktop-tauri-clippy upstream-rot | Blocker: keine
