@@ -111,7 +111,9 @@ Espo = Pipeline-Wahrheit (Status, Score, `cNextAction`, Touchpoint-Historie). Va
 ### Espo-Fallen (gemessen 2026-08-01, nicht geraten)
 
 - Nur Scopes mit `acl: true` in der Metadata sind rollen-konfigurierbar (33 Stück). `Note`, `Stream`, `Notification` sind abgeleitet — stehen sie in den Rollendaten, antwortet Espo `403 code 1010`.
-- **Ein Scope, den keine Rolle erwähnt, fällt auf VOLLZUGRIFF zurück**, nicht auf „kein Zugriff". Jeder ungenutzte Scope muss explizit abgeschaltet werden — sonst ist der „minimale" User faktisch Admin.
+- **Vollzugriff-Fallback — präzisiert am 01.08. durch Messung (buzz#29):** Ein User **ohne jede Rolle** hat Vollzugriff. Ein User **mit mindestens einer Rolle** erbt das NICHT: Scopes, die keine seiner Rollen erwähnt, bleiben gesperrt. Beweis: Rolle `agent-api` nennt fünf Scopes, ihr User bekommt 403 auf Opportunity, Email, Document, Campaign, Task, Meeting. **Konsequenz: Eine Rolle zu entfernen ist nie ein Rollback — es ist eine Eskalation auf Vollzugriff.** Rollback = vorherige Rolle wieder zuweisen. (Die frühere Formulierung „jeder unerwähnte Scope fällt auf Vollzugriff" war zu allgemein und hätte zu genau dem falschen Rollback geführt.)
+- Ein Rollen-Update ist ein `PUT /Role/<id>` mit dem **kompletten** `data`-Objekt — ein Teilobjekt löscht jeden ausgelassenen Scope.
+- Mehrere Rollen werden per **Maximum** gemergt: eine engere Rolle *zusätzlich* zu vergeben bewirkt nichts, sie muss die alte **ersetzen**.
 - Espo löscht soft: nach dem DELETE sieht der Admin weiter einen Grabstein mit `deleted: true`, jeder normale Lesepfad liefert 404.
 - `crm.adas.jetzt` steht hinter Cloudflare: dessen Browser Integrity Check beantwortet Default-Library-User-Agents (z. B. `Python-urllib/*`) mit `error code: 1010` — sieht aus wie ein Espo-Rechtefehler, ist aber Cloudflare. Jeder Client schickt deshalb einen expliziten `User-Agent`.
 
@@ -152,6 +154,36 @@ Rechte sind kein Zustand, den man einmal setzt: Espo-Upgrades und neue Custom-En
 | Scheduler rot | n8n-Execution `141485` mit gewidmeter Rolle: `alarm: true`, Telegram-Node gelaufen (`ok: true`) |
 | Scheduler grün | Execution `141487` nach Revert und `141501` mit allen drei Usern: `alarm: false`, kein Telegram |
 | Referenzstand geschützt | `test/e2e.mjs` 14/14 vor und nach der Arbeit |
+
+### n8n-CRM-Rechte aus gemessenem Bedarf (buzz#29)
+
+Die Bedarfsanalyse war die Arbeit, nicht das Klicken der Rolle. Ergebnis über **alle 96 n8n-Workflows**: 34 sprechen mit Espo, und **alle 34 hängen an genau einer Credential** — `EspoCRM n8n-agent (ADA-44)` → Espo-User `n8n-agent`. Kein hartkodierter Key, kein zweiter Pfad.
+
+| Entity | Was Flows wirklich tun | Rolle `n8n-crm` |
+|---|---|---|
+| Lead | GET/POST/PUT (~20 Flows), **DELETE nur `[E2E] funnel-probe`** (täglich 04:45 UTC, Cleanup) | create/read/edit/stream/**delete** — delete bleibt, weil ein Live-Flow es braucht |
+| CTouchpoint | GET/POST/PUT (~20 Flows, `[ADA-24] letter-send` editiert Status), **DELETE nur funnel-probe** | create/read/edit/stream/**delete** — dito |
+| CConsent | nur POST (`[ADA-17] doi`) | create + read — **edit/delete weg** (Consent ist Audit-Beweis) |
+| Contact | nur GET (`[ADA-237] email-inbound-agent`) | read + stream — **create/edit/delete weg** |
+| Account | **nichts** | komplett gesperrt (explizit, nicht weggelassen) |
+| Note | POST (`[ADA-41] handover`) | abgeleiteter Scope, nicht rollen-konfigurierbar |
+
+**Die Ticket-Prämisse war falsch und wurde gemessen korrigiert:** `claude-mcp-admin` ist NICHT der User hinter den n8n-Flows. Kein einziger n8n-Node benutzt ihn, und zum Zeitpunkt „seiner" Lead-Anlagen (01.08. 04:15 UTC) lief **keine** n8n-Execution. Er schreibt trotzdem aktiv (231 von 282 Leads, 235 Modifikationen) — der Consumer sitzt außerhalb von n8n und ist unbekannt. Deshalb blieb er **unangetastet**: Rechte werden nicht auf Verdacht entzogen, aber auch nicht blind gekürzt, solange der Verbraucher nicht identifiziert ist. Eigenes Ticket.
+
+**Rollback (dokumentiert, nicht getestet-nötig):** `PUT /User/6a29c075a26908652 {"rolesIds":["6a29c0748348d941f"]}` — alte Rolle `agent-api` zurück. **Nicht** die Rolle entfernen (= Vollzugriff). Skript: `tools/apply-n8n-crm-role.mjs --rollback`; das Set-Skript rollt bei jedem roten Check automatisch selbst zurück.
+
+**Beweis nach der Umstellung (18/18 direkt + echte Executions):**
+
+| Prüfung | Ergebnis |
+|---|---|
+| Lesepfade GET Lead/Contact/CTouchpoint | 200 |
+| Schreibpfade POST/PUT Lead, POST/PUT CTouchpoint, POST CConsent | 200 |
+| Cleanup-Pfad DELETE Lead + DELETE CTouchpoint | 200 |
+| Entzogen: Account GET · Contact create/edit/delete · CConsent edit/delete | 403 |
+| Unverändert gesperrt: Opportunity, Email | 403 |
+| `[ADA-44] crm-lead-search` (echte Execution nach der Umstellung) | HTTP 200, 269 Treffer |
+| `[E2E] funnel-probe` (erzwungene Execution `141536`) | success — Lead über den Live-Funnel angelegt, `CL Delete Lead` ok, `CL Delete TP` ok, Kuma-Up gepingt |
+| ACL-Wächter (#28) gegen den neuen Snapshot | grün, 3/3 User |
 
 ## Approval-Gate (buzz#9 — kein Outbound ohne Freigabe)
 
