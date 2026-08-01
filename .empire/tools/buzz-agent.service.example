@@ -1,0 +1,31 @@
+# systemd-Unit für einen headless Buzz-Agenten (buzz-acp-Harness) auf einem Server.
+# Vorlage zu .empire/ONBOARDING.md §4.6 — Platzhalter <ROLLE> ersetzen und nach
+# /etc/systemd/system/buzz-<ROLLE>.service kopieren.
+#
+#   systemctl daemon-reload
+#   systemctl enable --now buzz-<ROLLE>.service
+#   systemctl is-active buzz-<ROLLE>.service
+#
+# Die EnvironmentFile enthält den Secret-Key des Agenten und den LLM-Zugang dieses Geräts:
+# chmod 600, root-only, nie ins Repo. Warum systemd und nicht `nohup … &`: ein per nohup
+# über SSH gestarteter Harness stirbt kurz nach dem Ende der SSH-Sitzung (gemessen 2026-08-01).
+
+[Unit]
+Description=Buzz agent "<ROLLE>" (buzz-acp harness)
+Documentation=https://github.com/munirad7s/buzz/blob/main/.empire/ONBOARDING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/buzz-agents/work
+EnvironmentFile=/opt/buzz-agents/<ROLLE>.conf
+ExecStart=/opt/buzz-agents/bin/buzz-acp
+Restart=on-failure
+RestartSec=10
+MemoryMax=1G
+StandardOutput=append:/opt/buzz-agents/logs/<ROLLE>.log
+StandardError=append:/opt/buzz-agents/logs/<ROLLE>.log
+
+[Install]
+WantedBy=multi-user.target
