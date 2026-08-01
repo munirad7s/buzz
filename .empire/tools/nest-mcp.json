@@ -1,0 +1,55 @@
+{
+  "mcpServers": {
+    "google-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "--prefix",
+        "C:/Users/rescue/mcp-servers/google-mcp",
+        "tsx",
+        "C:/Users/rescue/mcp-servers/google-mcp/src/index.ts"
+      ],
+      "env": {}
+    },
+    "telegram-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "--prefix",
+        "C:/Users/rescue/mcp-servers/telegram-mcp",
+        "tsx",
+        "C:/Users/rescue/mcp-servers/telegram-mcp/src/index.ts"
+      ],
+      "env": {}
+    },
+    "espo-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "--prefix",
+        "C:/Users/rescue/mcp-servers/espo-mcp",
+        "tsx",
+        "C:/Users/rescue/mcp-servers/espo-mcp/src/index.ts"
+      ],
+      "env": {}
+    },
+    "obsidian-mcp-tools": {
+      "type": "stdio",
+      "command": "C:/Users/rescue/Documents/Ai_Brain/.obsidian/plugins/mcp-tools/bin/mcp-server.exe",
+      "args": [],
+      "env": {}
+    },
+    "n8n-api": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "C:/Users/rescue/.buzz/mcp-env-shim.js",
+        "--keys",
+        "N8N_API_URL,N8N_API_KEY",
+        "--",
+        "C:/Users/rescue/AppData/Local/Volta/bin/n8n-mcp.cmd"
+      ],
+      "env": {}
+    }
+  }
+}

@@ -521,6 +521,132 @@ Deshalb gilt hart: **`status: sent` ist der einzige Beleg für „raus". `pendin
 
 **Offen und ehrlich benannt:** Der Positiv-Beweis („Freigabe → Mail kommt an → `status: sent`") hängt an einer echten Antwort Munirs. Bemerkenswert dabei: **die Audit-Kette enthält bis heute keine einzige echte Freigabe** — der Positiv-Beweis aus buzz#9 war transport-gemockt, der Vorflug-Versuch eines Vorgänger-Agenten (`G-0182A6`) blieb unbeantwortet. Anfrage `G-E78AD0` (TG msg 101) läuft; Kommando: `node test/positive-proof.mjs`, Status via `--status <sendId>`. Der Pfad dahinter ist bis auf diesen Schritt bewiesen: derselbe Sender hat mit korrektem Hash nachweislich eine echte Mail zugestellt — nur aus einem Direktaufruf beim Aufdecken des Scope-Befunds, nicht aus einer Freigabe.
 
+## MCP-Grundausstattung des Dispatchers (buzz#3 — Vault · Backlog · n8n)
+
+**Befund, der alles andere überschreibt: die agent-scoped `.mcp.json` aus buzz#4 war bis heute wirkungslos.** Die Entscheidung „Variante (a), Nest-Workdir" bleibt richtig — die Umsetzung hatte ein stilles Loch, und es traf #4/#5/#6 gleichzeitig, ohne dass es auffiel.
+
+### Der stille Fehler: „Pending approval" ist ein lautloser Totalausfall
+
+`~/.buzz/.claude/settings.local.json` trug `enableAllProjectMcpServers: true` — das reicht **nicht**. Gemessen mit `claude mcp list` aus `cwd = ~/.buzz`:
+
+```
+telegram-mcp: … - ⏸ Pending approval (run `claude` to approve)
+espo-mcp:     … - ⏸ Pending approval (run `claude` to approve)
+```
+
+Und in einer frischen Session existierte **kein einziges** `mcp__telegram-mcp__*`/`mcp__espo-mcp__*`-Tool. Kein Fehler, kein Log, keine Warnung — die Server sind einfach nicht da. Ein Agent, der nach dem Werkzeug greift, findet es nicht und improvisiert.
+
+Der Grund: die Freigabe von `.mcp.json`-Servern hängt am **Projekt-Eintrag in `~/.claude.json`**, nicht am Projekt-Settings-File. `~/.buzz` hatte dort überhaupt keinen Eintrag. Weder `enableAllProjectMcpServers` noch `enabledMcpjsonServers` in `~/.buzz/.claude/settings.json` bzw. `settings.local.json` änderten daran etwas (beides einzeln gemessen, beide Male weiter „Pending approval").
+
+**Der Fix** (einmalig, additiv, außerhalb von Munirs Projekten):
+
+```jsonc
+// ~/.claude.json
+"projects": {
+  "C:/Users/rescue/.buzz": {
+    "hasTrustDialogAccepted": true,
+    "enabledMcpjsonServers": ["telegram-mcp","espo-mcp","google-mcp","obsidian-mcp-tools","n8n-api"],
+    "disabledMcpjsonServers": [], "mcpServers": {}, "allowedTools": []
+  }
+}
+```
+
+Danach dieselbe Abfrage: alle fünf `✔ Connected`.
+
+**Konsequenz für jedes künftige Ticket, das einen MCP-Server ins Nest hängt:** Server in `~/.buzz/.mcp.json` eintragen **und** den Namen in `enabledMcpjsonServers` des Nest-Projekteintrags in `~/.claude.json` ergänzen. Danach `cd ~/.buzz && claude mcp list` gegenprüfen — „Pending approval" heißt: der Agent hat das Werkzeug nicht.
+
+**Zweite Falle, gleiche Klasse:** Die MCP-Konfiguration wird beim **Start des Agenten-Prozesses** gelesen, nicht pro Nachricht. Die laufenden `buzz-acp`/`claude-agent-acp`-Prozesse starteten am 01.08. um 12:38 CEST, `espo-mcp` kam um 13:11 dazu — der Agent kannte es um 15:17 immer noch nicht. Nach jeder `.mcp.json`-Änderung gehört der Agent im Desktop gestoppt und gestartet.
+
+### Was jetzt im Nest hängt
+
+| Server | Zweck | Secrets |
+|---|---|---|
+| `obsidian-mcp-tools` | Vault lesen (Plugin-Binary im Vault, 18 Tools) | keine |
+| `n8n-api` | n8n lesen (`n8n_health_check`, `n8n_executions`, `n8n_list_workflows`; 24 Tools) | über Shim |
+| `google-mcp` · `telegram-mcp` · `espo-mcp` | Gmail (#4) · Kanal (#5) · CRM (#6) | Server lesen `master.env` selbst |
+
+**GitHub bleibt bewusst ohne MCP.** Der Backlog ist Text, `gh issue list -R <repo> --label ready --state open --json …` liefert exakte, zitierfähige Zahlen, und ein weiterer Server kostet Kontext in **jeder** Session. Verankert als Frage→Werkzeug-Tabelle in `~/.buzz/AGENTS.md`.
+
+### Keine Secrets in `.mcp.json` — `.empire/tools/mcp-env-shim.js`
+
+`n8n-api` braucht `N8N_API_URL`/`N8N_API_KEY`. Beides in `~/.buzz/.mcp.json` zu schreiben wäre bequem, macht die Datei aber unveröffentlichbar — und der Nest wird bei Buzz-Upgrades regeneriert, die Wiederherstellungsquelle ist dieses **öffentliche** Repo. Deshalb startet der Server über einen Shim, der die Keys zur Laufzeit aus `~/.secrets/master.env` holt und **nur die per `--keys` benannten** weiterreicht (Allowlist statt Vollexport von 200+ Secrets):
+
+```json
+"n8n-api": { "type": "stdio", "command": "node",
+  "args": ["C:/Users/rescue/.buzz/mcp-env-shim.js", "--keys", "N8N_API_URL,N8N_API_KEY",
+           "--", "C:/Users/rescue/AppData/Local/Volta/bin/n8n-mcp.cmd"] }
+```
+
+Rot-Proben gemessen: Schlüssel fehlt → Exit 65 mit Klartext, Env-Datei fehlt → Exit 66. Der Shim startet nie still ohne Key. Kanonische Kopie: `.empire/tools/mcp-env-shim.js` → `cp` nach `~/.buzz/mcp-env-shim.js`.
+
+### Lesen erlaubt, Schreiben hart verboten (`permissions.deny`)
+
+Das Ticket verlangt Lesezugriff; n8n und der Vault sind geteilte Live-Systeme. Weil `n8n-api` und `obsidian-mcp-tools` fremde Server sind, lässt sich ihr Tool-Set nicht wie bei `espo-mcp`/`google-mcp` amputieren — der Guardrail sitzt deshalb eine Ebene höher, in `~/.buzz/.claude/settings.json`:
+
+```json
+"permissions": { "deny": [
+  "mcp__n8n-api__n8n_create_workflow", "mcp__n8n-api__n8n_update_full_workflow",
+  "mcp__n8n-api__n8n_update_partial_workflow", "mcp__n8n-api__n8n_delete_workflow",
+  "mcp__n8n-api__n8n_autofix_workflow", "mcp__n8n-api__n8n_deploy_template",
+  "mcp__n8n-api__n8n_generate_workflow", "mcp__n8n-api__n8n_test_workflow",
+  "mcp__n8n-api__n8n_manage_credentials", "mcp__n8n-api__n8n_manage_datatable",
+  "mcp__obsidian-mcp-tools__create_vault_file", "mcp__obsidian-mcp-tools__update_active_file",
+  "mcp__obsidian-mcp-tools__patch_vault_file", "mcp__obsidian-mcp-tools__patch_active_file",
+  "mcp__obsidian-mcp-tools__delete_vault_file", "mcp__obsidian-mcp-tools__delete_active_file",
+  "mcp__obsidian-mcp-tools__execute_template" ] }
+```
+
+`append_to_vault_file` bleibt bewusst erlaubt — es ist der in buzz#11 dokumentierte Fallback des Journal-Appends und die einzige kollisionsfreie Schreiboperation. `patch_vault_file` ist doppelt draußen: verboten **und** fachlich kaputt (Offset-Bug bei Umlauten).
+
+### Munirs interaktives Setup: unverändert (gemessen, nicht behauptet)
+
+| Prüfung | Ergebnis |
+|---|---|
+| `~/.claude.json` → `.mcpServers` (global) vorher/nachher | **identisch** — kein neuer globaler Server |
+| `~/.claude.json` → `projects` | genau **ein** neuer Key: `C:/Users/rescue/.buzz` |
+| `~/.claude.json` → Eintrag `C:/Users/rescue/projects/buzz` | identisch |
+| `~/.claude/settings.json` · `mcp-library.json` · `settings.local.json` | SHA-256 unverändert |
+| Park-System `mcp on/off` | nicht angefasst; das Nest pinnt jetzt zusätzlich, ein `mcp off` entwaffnet die Agenten nicht mehr |
+
+Der einzige Unterschied außerhalb von `projects` waren Telemetrie-Zähler, die laufende Sessions selbst schreiben.
+
+### Beweisstand (2026-08-01)
+
+| Schritt | Beweis |
+|---|---|
+| **Kanal-Vorflug (der offene Rest aus #4/#6/#7)** | `@claude` in `#agent-lab` → Antwort nach 13 s mit Kennung `PF-A1B2`: „Mention in agent-lab erreicht mich". Der Dispatcher ist im Kanal ansprechbar |
+| Baseline-Inventar aus dem Kanal | derselbe Agent listet auf Zuruf seine 40 MCP-Server — und meldet von sich aus: „`espo-mcp` … ist in dieser Session NIE als `mcp__espo-mcp__`-Tool aufgetaucht". Der Befund oben kam aus dem laufenden System, nicht aus dem Code |
+| Vault-Werkzeug | aus `cwd=~/.buzz`: `mcp__obsidian-mcp-tools__*` liefert `## #1 🎓 Klausuren-Survival — ENDSPURT (Survivor aktiv seit 24.07.)` aus `99 System/Now.md` |
+| n8n-Werkzeug | `mcp__n8n-api__n8n_health_check` → `ok`; unabhängig gegengeprüft: `/executions?limit=3` liefert 141546/141545/141544, alle `success` |
+| Backlog-Werkzeug | `gh issue list -R munirad7s/buzz --label ready --state open` → **16**, identisch mit der unabhängigen Zählung |
+| **Detektor kann rot werden** | vor dem Fix meldete derselbe Pfad „Pending approval" und die Tools fehlten in der Session; Shim-Rot-Proben Exit 65/66; `claude mcp list` warnt zusätzlich vor der Doppel-Definition `n8n-api` (user vs. project) und benennt den aktiven Endpunkt |
+
+### Offen — harter Blocker: Abo-Kontingent, nicht die Verdrahtung
+
+Der Kanal-Beweis für die drei Fachfragen (Vault/Backlog/n8n **als Antwort des Dispatchers**) steht aus. Ab 15:39 CEST beantwortet der `claude`-Agent gar nichts mehr:
+
+```
+WARN buzz_acp: agent_returned (application error — pipe intact) agent=0
+  configured_model=claude-fable-5[1m]
+  error=Agent reported error (code -32603): Internal error: You're out of usage credits.
+```
+
+Dieselbe Klasse wie der Codex-Befund aus buzz#18, nur auf dem Claude-Abo: **die Auth ist heil, das Kontingent ist leer.** `claude-fable-5[1m]` ist die 1M-Kontext-Variante; dieselbe Maschine bedient parallel weiter andere Modelle (die Beweise oben liefen über `--model sonnet`). Der Agent bleibt gesund (`pipe intact`), requeued mit exponentiellem Backoff (7 s → 276 s) und verliert die Nachricht danach.
+
+Headless nicht umgehbar: das Modell steckt im Agent-Record, und `managed-agents.json` hat **keinen File-Watcher** (`managed_agents/reconcile.rs:13` — „hand edits are picked up at next boot only"); zudem gibt `session/new` das Modell explizit vor, ein `model` in den Nest-Settings sticht das nicht. Ein Modellwechsel ist ein Klick in Munirs Desktop oder ein App-Neustart mit fünf laufenden Agenten — beides gehört ihm.
+
+### Wiederherstellung nach einem Buzz-Upgrade
+
+Der Nest wird bei Upgrades regeneriert. Kanonische, secret-freie Kopien liegen im Repo:
+
+```bash
+cp .empire/tools/nest-mcp.json            ~/.buzz/.mcp.json
+cp .empire/tools/nest-claude-settings.json ~/.buzz/.claude/settings.json
+cp .empire/tools/mcp-env-shim.js          ~/.buzz/mcp-env-shim.js
+cp .empire/tools/vault-log.sh             ~/.buzz/vault-log.sh
+```
+
+Der Projekteintrag in `~/.claude.json` liegt bewusst NICHT im Repo (Munirs Datei) — er muss nach einem Reset von Hand nachgezogen werden, sonst stehen alle Nest-Server wieder auf „Pending approval".
 ## Führungsrituale auf echten Daten (buzz#10 — Morgenbrief 08:45 · Gate-Batch 20:45)
 
 **Entschieden: ein messendes Script (`.empire/tools/ritual.sh`) als einzige Inhaltsquelle, der Agent ist nur noch Transport.**
