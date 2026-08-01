@@ -1921,3 +1921,23 @@ Die frühere Notiz „Stripe fehlt bewusst — als Lücke benannt statt als 0 �
 | Morgenbrief ohne Key | „Stripe kann ich nicht sehen — dort könnte Geld eingegangen sein, das in dieser Zeile fehlt." |
 
 **Noch offen (braucht den Key):** Stichprobe gegen echte Stripe-Daten und die Schreibschutz-Probe (ein Schreibaufruf mit dem Key muss abgelehnt werden). **Derselbe Handgriff hängt an agency-infra#130** (`STRIPE_INVOICE_EXPORT_KEY`, Invoices:read) — ein Restricted Key mit den drei Lese-Rechten Invoices/Charges/Subscriptions bedient beide Tickets.
+
+### Nachtrag zu #106: drei Fehler, die erst der Datumswechsel und die Rot-Probe zeigten
+
+Der Brief lief um 20:50 sauber und um 00:35 nicht mehr. Alle drei Befunde sind gemessen, keiner war vorher sichtbar:
+
+1. **Termine, die vor Mitternacht begonnen haben, standen als „morgen" im Brief.** Google liefert im Fenster auch Termine, die vor `timeMin` begonnen haben und noch laufen. Der Vergleich `start == heute → "Um", sonst "Morgen um"` warf damit Vergangenes in die Zukunft: der gestrige 23:00-Block erschien als „Morgen um 23:00". Jetzt wird **dreifach** unterschieden (`< heute` → „Läuft noch, seit", `== heute` → „Um", `> heute` → „Morgen um") und die Liste ist nach `start` sortiert. **Regel: bei Kalenderfenstern ist „nicht heute" nicht dasselbe wie „morgen".**
+2. **Die Kopfzeile brach mitten im Satz ab, sobald zwei Monitore rot waren.** Eine Kopfzeile, die auf „… meldet backup-offsite, mollie-recurring als …." endet, ist schlechter als eine kürzere vollständige. Jetzt: passt die volle Fassung nicht in eine Zeile, wird sie aus den Messdaten neu gebaut („backup-offsite und 1 weitere Überwachung ist ausgefallen"), nicht abgeschnitten. **Regel: eine Zeile, die allein tragen soll, darf nie ein Fragment sein.**
+3. **Eine Lücke ohne Abschnitt ist wieder eine stille Null.** Seit #106 hat der Morgenbrief keinen Entscheidungs-Block mehr — Lücken der Kategorie `entscheidungen` wurden also erhoben, kategorisiert und dann **von keinem Renderer ausgegeben**. In der Rot-Probe fiel die Empfehlung sichtbar zurück, aber niemand erfuhr warum. Jetzt rendert der „Zwei-Minuten"-Abschnitt sie mit. **Regel: nach jedem Umbau der Abschnitte prüfen, ob jede Lücken-Kategorie noch einen Abschnitt hat, der sie druckt.**
+
+Zusätzlich: Lücken-Sätze sind bei 130 Zeichen gedeckelt (Wortgrenze). Eine Repo-Liste mit 20 Namen flutet sonst den Brief, egal wie ehrlich sie ist.
+
+### Die eine Handlung kommt aus dem Audit, nicht aus dem Label (adas-empire#86)
+
+„Wenn du zwei Minuten hast" zog vorher das älteste offene `P1-money`-`blocked-munir`-Ticket. Das ist die falsche Quelle: es gibt rund 90 solcher Tickets, viele sind **Dubletten derselben Handlung**, und die Sortierung nach echter Geldwirkung steckt im Audit `adas-empire#86` („Die ersten sieben"), nicht im Label.
+
+Der Brief liest deshalb **Zeile 1 der Tabelle** aus diesem Issue — ein Satz, den ein Mensch nach Geldwirkung sortiert hat, mitsamt Ticket-Referenz. Quelle umstellbar über `RITUAL_MUNIR_LISTE`.
+
+**Ist die Quelle nicht lesbar, wird das gesagt** („Die Blockerliste … war nicht lesbar — die Empfehlung oben ist nur das älteste Geld-Ticket, nicht das wichtigste") und der Brief fällt sichtbar auf den alten Weg zurück. Rot-Probe mit `RITUAL_MUNIR_LISTE=munirad7s/adas-empire#999999` gefahren — genau dieser Satz erschien, und **genau diese Probe hat Befund 3 oben aufgedeckt**.
+
+**Folge für alle Agenten:** Wer `adas-empire#86` pflegt, schreibt direkt in Munirs Morgenbrief. Zeile 1 der Tabelle ist kein Notizzettel mehr.

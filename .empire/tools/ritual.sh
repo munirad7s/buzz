@@ -101,7 +101,12 @@ gap() { printf '%s\t%s\n' "$1" "$2" >> "$GAPFILE"; }
 gaps_for() { awk -F'\t' -v w="$1" '{n=split($1,c," "); for(i=1;i<=n;i++) if(c[i]==w){print $2; break}}' "$GAPFILE"; }
 gaps_flat() { cut -f2- "$GAPFILE"; }
 # Im Brief steht kein Stichwort-Fragment, sondern ein Satz — auch die Luecke.
-gaps_satz() { gaps_for "$1" | sed 's/[^.…!?]$/&./'; }
+# Keine Luecke darf den Brief fluten: eine Repo-Liste mit 20 Namen ist als
+# Luecken-Satz genauso unlesbar wie als Block. Deckel bei 130 Zeichen, an der
+# Wortgrenze — der Vollstand steht im Log.
+gaps_satz() {
+  gaps_for "$1" | sed 's/[^.…!?]$/&./'     | awk '{ if (length($0) > 130) { s = substr($0, 1, 130); sub(/ [^ ]*$/, "", s); print s " …" } else print }'
+}
 has_gap() { [ -n "$(gaps_for "$1")" ]; }
 gapcount() { wc -l < "$GAPFILE" | tr -d ' '; }
 
@@ -588,6 +593,33 @@ write_snapshot() {
   return 0
 }
 
+# (g) Munir-Blockerliste — adas-empire#86. Die eine Handlung im Morgenbrief
+# wird NICHT neu erhoben: der Backlog kennt 93 blocked-munir-Tickets, aber viele
+# sind Dubletten derselben Handlung, und die Sortierung nach Geldwirkung steckt
+# im Audit, nicht im Label. Deshalb ist Zeile 1 der Tabelle „Die ersten sieben"
+# aus #86 die Quelle — ein Satz, den ein Mensch nach echter Geldwirkung sortiert
+# hat. Fällt die Quelle aus, steht das als Lücke da und der Brief fällt sichtbar
+# auf das ältestes-P1-money-Ticket zurück. Kein erfundener Satz.
+MUNIR_LISTE_ISSUE="${RITUAL_MUNIR_LISTE:-munirad7s/adas-empire#86}"
+collect_munir_liste() {
+  local repo nr body
+  repo="${MUNIR_LISTE_ISSUE%#*}"; nr="${MUNIR_LISTE_ISSUE##*#}"
+  if ! body="$(gh issue view "$nr" -R "$repo" --json body -q .body 2>"$TMP/ml.err")"; then
+    gap "entscheidungen" "Die Blockerliste ($MUNIR_LISTE_ISSUE) war nicht lesbar — die Empfehlung oben ist nur das älteste Geld-Ticket, nicht das wichtigste"
+    return 1
+  fi
+  # Erste Datenzeile der Tabelle: | **1** | **<Satz>** | <Ticket> | <Warum> |
+  printf '%s' "$body" | tr -d "$CR" \
+    | awk -F'|' '/^\| *\*\*1\*\* *\|/ { print $3 "\t" $4; exit }' \
+    | sed -e 's/\*\*//g' -e 's/`//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    > "$TMP/munir1.txt"
+  if [ ! -s "$TMP/munir1.txt" ]; then
+    gap "entscheidungen" "Die Blockerliste ($MUNIR_LISTE_ISSUE) hat keine erste Zeile geliefert — die Empfehlung oben ist nur das älteste Geld-Ticket, nicht das wichtigste"
+    rm -f "$TMP/munir1.txt"; return 1
+  fi
+  return 0
+}
+
 # (d) Foki — die drei #-Überschriften aus Now.md. Vault ist Kanon.
 collect_foki() {
   if [ ! -f "$NOW_MD" ]; then
@@ -774,9 +806,32 @@ befunde() {
   # Die Kopfzeile darf nicht "irgendwas ist kaputt" sagen und den Leser nach
   # unten schicken — sie muss allein tragen. Also: dieselbe erste Sache, nur
   # kurz genug für eine Zeile.
+  # Und sie muss ein GANZER Satz bleiben. Ein abgeschnittenes „… meldet
+  # backup-offsite, mollie-recurring als …." ist schlechter als eine kürzere,
+  # aber vollständige Aussage — gemessen, sobald zwei Monitore rot waren.
   KAPUTT_KURZ=""
-  [ -n "$KAPUTT" ] && KAPUTT_KURZ="$(kurz "$(printf '%s\n' "$KAPUTT" | head -1 \
-      | sed -e 's/^Auf dem Server stimmt etwas nicht: //' -e 's/\.$//' -e 's/;.*//')" 62)"
+  if [ -n "$KAPUTT" ]; then
+    local roh; roh="$(printf '%s\n' "$KAPUTT" | head -1 \
+      | sed -e 's/^Auf dem Server stimmt etwas nicht: //' -e 's/\.$//' -e 's/;.*//')"
+    KAPUTT_KURZ="$(kurz "$roh" 62)"
+    case "$KAPUTT_KURZ" in
+      *' …')
+        # Passt nicht in eine Zeile. Statt vage zu werden: EIN Name plus Anzahl.
+        # Vollständig stehen sie zwei Abschnitte weiter unten.
+        local kn kd
+        kn="$(jq -r '(.server.kuma_down // [])|length' "$TMP/lage.json" 2>/dev/null | tr -d "$CR")"
+        kd="$(jq -r '(.server.kuma_down // [])[0] // ""' "$TMP/lage.json" 2>/dev/null | tr -d "$CR")"
+        if [ -n "$kd" ] && [ "${kn:-0}" -gt 1 ] 2>/dev/null; then
+          KAPUTT_KURZ="$kd und $((kn-1)) weitere $([ "$((kn-1))" -eq 1 ] && printf 'Überwachung ist' || printf 'Überwachungen sind') ausgefallen"
+        elif [ -n "$kd" ]; then
+          KAPUTT_KURZ="die Überwachung $kd ist ausgefallen"
+        else
+          KAPUTT_KURZ="$(printf '%s' "$roh" | sed 's/:.*//')"
+          [ "${#KAPUTT_KURZ}" -gt 62 ] && KAPUTT_KURZ="auf dem Server stimmt etwas nicht"
+        fi
+        ;;
+    esac
+  fi
 
   GELD_ALARM=""
   if [ -f "$TMP/lage.json" ]; then
@@ -804,6 +859,16 @@ befunde() {
 zwei_minuten() {
   if [ -n "$WARTET_NAME" ] && [ "$WARTET_KLASSE" = "kunde" ]; then
     printf 'Antworte %s. Zwei Sätze reichen — Hauptsache, es kommt heute etwas zurück.\n' "$(kurz "$WARTET_NAME" 40)"
+    return
+  fi
+  # Erste Wahl: der von Hand nach Geldwirkung sortierte Kopf der Blockerliste.
+  if [ -s "$TMP/munir1.txt" ]; then
+    local satz ticket
+    satz="$(cut -f1 "$TMP/munir1.txt")"
+    ticket="$(cut -f2 "$TMP/munir1.txt" | sed -e 's/[[:space:]]*→.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ "$REDACT" = "1" ]; then satz="‹Handlung geschwärzt›"; ticket=""; fi
+    printf '%s\n' "$(kurz "$satz" 150)"
+    [ -n "$ticket" ] && printf '(%s)\n' "$ticket"
     return
   fi
   if [ -f "$TMP/blocked.json" ] && [ "$(jq -r 'length' "$TMP/blocked.json")" -gt 0 ]; then
@@ -984,9 +1049,16 @@ render_morgenbrief() {
         jq -r --arg heute "$(date '+%Y-%m-%d')" --argjson redact "$REDACT" '
           def was($s): if $redact == 1 then "‹Termin geschwärzt›" else ($s|.[0:44]) end;
           [.events[]|select(.allDay)] as $a |
-          [.events[]|select(.allDay|not)] as $t |
+          # Chronologisch, und die Tagesgrenze wird DREIFACH unterschieden.
+          # Google liefert im Fenster auch Termine, die vor `timeMin` begonnen
+          # haben und noch laufen; die wurden vorher als „Morgen" ausgegeben —
+          # gemessen um 00:35, als der gestrige 23:00-Block als „morgen 23:00"
+          # im Brief stand. Vergangen ist nicht künftig.
+          [.events[]|select(.allDay|not)|select(.start != null)] | sort_by(.start) as $t |
           ([ $a[] | "   Den ganzen Tag: " + was(.summary) + "." ]
-           + [ $t[] | (if (.start|.[0:10]) == $heute then "   Um " else "   Morgen um " end)
+           + [ $t[] | (if   (.start|.[0:10]) <  $heute then "   Läuft noch, seit "
+                       elif (.start|.[0:10]) == $heute then "   Um "
+                       else "   Morgen um " end)
                       + (.start|.[11:16]) + " " + was(.summary)
                       + (if .location and $redact == 0 then " (" + (.location|.[0:22]) + ")" else "" end) + "." ])[0:6] | .[]
         ' "$TMP/cal.json" | tr -d "$CR"
@@ -1009,6 +1081,12 @@ render_morgenbrief() {
     # --- Wenn du zwei Minuten hast
     printf '\n⏱️ Wenn du zwei Minuten hast\n'
     zwei_minuten | sed 's/^/   /'
+    # Ohne diese Zeile wären die Lücken der Kategorie `entscheidungen` im
+    # Morgenbrief STUMM: der Brief hat seit #106 keinen Entscheidungs-Block
+    # mehr, in dem sie sonst aufschlügen. Gemessen in der Rot-Probe — die
+    # Empfehlung fiel sichtbar zurück, aber niemand erfuhr warum. Eine Lücke,
+    # die keinen Abschnitt hat, ist wieder eine stille Null.
+    gaps_satz entscheidungen | sed 's/^/   /'
   } | falte > "$out"
   printf '%s' "$out"
 }
@@ -1388,6 +1466,7 @@ case "$MODE" in
     collect_calendar
     collect_people
     collect_blocked
+    collect_munir_liste || true
     BRIEF="$(render_morgenbrief)"
     CH="${BUZZ_CHANNEL:-$CH_GENERAL}"; LABEL="🌅 Morgenbrief"
     ;;
