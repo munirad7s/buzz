@@ -1202,3 +1202,47 @@ Vorher im Agent-Log: `Agent reported error (code -32603): Internal error` — ac
 | `cargo nextest run -p buzz-acp --no-fail-fast` | 666 passed, 10 failed |
 
 **Zu den 10 roten Tests — gemessen, nicht weggeredet:** sie hängen alle an gespawnten Fake-Agenten (`/bin/bash: syntax error near unexpected token` in den Test-Fixtures) bzw. an Zeitfenstern, keiner berührt `agent_error_from_json`. 9 davon fallen auf dem **unveränderten** Baseline-Stand identisch um (mit `git stash` gegengeprüft); der zehnte (`acp_steer_failed_outcome_acks_outcome_rejected`) ist last-abhängig flaky und läuft isoliert mit und ohne die Änderung grün. Das ist eine Windows-Schwäche der Test-Fixtures und ein Gardener-Kandidat, kein Regressionsbefund.
+
+## Gmail-Token-Wächter (buzz#23 — tägliche Probe + Kuma-Heartbeat)
+
+**Entschieden: die Probe läuft auf Munirs Maschine per Aufgabenplanung, und ein Fehlschlag pusht NICHTS.**
+
+Die Gmail-Triage des Führungs-Postfachs (buzz#4/#32) hängt an genau einem Refresh-Token. Der vom 24.07. starb ≤ 8 Tage später (`invalid_grant`, Ursache: Consent-Screen im **Testing**-Modus). Seit dem 01.08. steht er auf „In production" — der Langzeitbeweis dafür stand aus und wird jetzt täglich erhoben statt angenommen.
+
+| Baustein | Ort |
+|---|---|
+| Probe | `munirad7s/google-mcp`, `scripts/token-probe.mjs` |
+| Startrampe Aufgabenplanung | `scripts/token-probe-task.cmd` (Log `~/.buzz/gmail-token-probe-task.log`) |
+| Kuma-Monitor `gmail-token` (id 54) | `scripts/kuma-add-gmail-token.mjs` (Socket.IO, idempotent) + Kopie in `/opt/agency/monitoring/provision/` |
+| Push-Token | `~/.secrets/master.env` → `KUMA_PUSH_GMAIL_TOKEN` |
+| Täglicher Lauf | Windows-Aufgabe `Gmail-Token-Waechter`, **07:10 Ortszeit** (vor dem ACL-Wächter 07:20 und dem Morgenbrief 08:45) |
+
+### Was gemessen wird — und warum genau das
+
+1. **Echter `grant_type=refresh_token`.** Ein `getAccessToken()` aus dem Cache würde grün melden, während der Refresh-Token längst tot ist. Es stirbt der Refresh-Token, also wird der geprüft.
+2. **`users.getProfile` + Abgleich gegen das erwartete Postfach.** Ein Token für ein anderes Konto ist kein Fehler, den man sieht — die Triage liest dann still das falsche Postfach.
+3. **Die tatsächlich gewährten Scopes** aus der Token-Antwort gegen die, die die Triage braucht (`gmail.readonly`, `.modify`, `.compose`). Ein still geschrumpfter Scope legt sie genauso lahm wie ein toter Token, nur leiser. Direkte Anwendung der buzz#32-Lektion: **ein Scope ist keine Zusicherung, solange man ihn nicht misst.**
+
+### Warum kein `status=down`-Push
+
+Ein down-Push setzt voraus, dass das Script noch läuft. Genau die schlimmsten Fälle — Script kaputt, Node weg, Rechner aus — würden dann still durchgehen. **Das Ausbleiben des Heartbeats ist der Alarm** (Toleranz 26 h, Muster `backup-sh`/`funnel-e2e`; Benachrichtigungen 2+3 = Telegram + Mail, wie bei allen neun bestehenden Push-Monitoren).
+
+Konsequenz, die nicht wegdiskutiert wird: die Aufgabe läuft „Nur interaktiv". **Ein ausgeschalteter oder abgemeldeter Rechner erzeugt nach 26 h denselben Alarm wie ein toter Token.** Das ist bewusst die sichere Richtung (lieber ein Fehlalarm als ein stilles Loch), aber es ist ein Fehlalarm-Risiko — und ein Wächter, dem niemand mehr glaubt, ist schlechter als keiner. Folge-Ticket buzz#86.
+
+### Gemessene Falle: `process.exit()` im offenen fetch-Kontext liefert 127 statt 1
+
+Auf Windows zerreisst ein `process.exit()` aus dem Inneren eines noch offenen `fetch`-Kontexts libuv: `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, Exit **127**. Beim `invalid_grant`-Pfad ist das zugeschnappt — die Meldung war korrekt, der Exit-Code falsch, und bei einem Wächter **ist der Exit-Code der Vertrag**. Behoben: Fehlschläge werden geworfen, der Prozess endet einmal am Ende nach dem Abklingen der Sockets. Regel für jedes Script hier: nie `process.exit()` mitten in einem laufenden HTTP-Aufruf.
+
+Zweite, harmlosere Falle: die `.cmd`-Startrampe schreibt echtes UTF-8 ins Log; `Get-Content` dekodiert per Default ANSI und zeigt `gewÃ¤hrt`. Die Datei ist in Ordnung — der Leser braucht `-Encoding utf8` (oder Git Bash).
+
+### Beweisstand (2026-08-01, alles live)
+
+| Schritt | Beweis |
+|---|---|
+| Positiv | `REFRESH=ok` · `PROFILE=…` · `SCOPES=ok (8 gewährt, 3 geprüft)` · Heartbeat gepusht · Exit **0** |
+| Kuma unabhängig gegengeprüft | `kuma.db` (`mode=ro`): Monitor `gmail-token` push/aktiv/93600, Notifications 2+3 gebunden, Heartbeat `status=1` — aus der DB gelesen, nicht aus der Script-Ausgabe |
+| **Detektor rot, 4×** | Token-Pfad kaputt → `tokens-missing` · Refresh-Token tot → `invalid_grant` (+ Re-Auth-Kommando) · falsches Postfach → `wrong-mailbox` · Credentials weg → `credentials-missing` — **jedes Mal Exit 1** |
+| **Kein Push bei Fehlschlag** | Heartbeat-Zähler über 4 Fehlläufe + 1 Erfolgslauf: 1 → 2. Genau der eine Erfolg hat gepusht |
+| **Scheduler live** | `schtasks /run` → Aufgabe „Letztes Ergebnis: 0", Log-Zeile `exit=0`, und ein **frischer** Heartbeat in Kuma 2 s später (Zähler 2 → 3). Nächster regulärer Lauf 02.08. 07:10 |
+
+**Langzeitbeweis:** ergibt sich aus der Kuma-Historie des Monitors — kein zusätzliches Ritual nötig. Bleibt der Monitor bis Ende August grün, ist der Production-Consent belegt; stirbt der Token, steht die Ursache mit Re-Auth-Kommando im Alarm.
