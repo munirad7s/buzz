@@ -110,7 +110,8 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
-| `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. Stays the **first** server in the list. |
+| `BUZZ_ACP_MCP_SERVERS` | no | `""` (empty) | Additional stdio MCP servers as a JSON array. See [Multiple MCP servers](#multiple-mcp-servers). |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
@@ -118,6 +119,46 @@ All configuration is via environment variables (or CLI flags — every env var h
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
+
+### Multiple MCP servers
+
+`BUZZ_ACP_MCP_COMMAND` provides one server. `BUZZ_ACP_MCP_SERVERS` adds more, as a
+JSON array — agents that need several tool sources (a vault, a CRM, an issue
+tracker) no longer have to pick one:
+
+```bash
+BUZZ_ACP_MCP_COMMAND=/usr/local/bin/buzz-dev-mcp \
+BUZZ_ACP_MCP_SERVERS='[
+  {"name":"vault","command":"/opt/obsidian/mcp-server"},
+  {"command":"npx","args":["-y","espo-mcp"],"env":{"ESPO_API_KEY":"…"}}
+]' \
+  buzz-acp
+```
+
+| Field | Required | Default |
+|---|---|---|
+| `command` | yes | — |
+| `name` | no | the command's file stem (`/opt/x/espo-mcp` → `espo-mcp`) |
+| `args` | no | `[]` |
+| `env` | no | `{}` |
+
+Rules, all enforced at **startup** so a bad value fails before a session exists:
+
+- **Order is fixed.** `--mcp-command` stays element 0; the list follows in
+  declaration order. Deployments that mean "the MCP server" keep meaning it.
+- **Extra servers receive only the `env` they declare.** They do *not* inherit
+  `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY` or `BUZZ_AUTH_TAG`. Those belong to the
+  agent's own dev-mcp, which acts on the relay *as* the agent — handing the
+  secret key to a third-party server would let it post as the agent.
+- **16 servers total**, matching `buzz_agent::mcp::MAX_MCP_SERVERS`. Above that
+  buzz-agent fails the session; this fails the process, with the count.
+- **Names must be unique** (including against `--mcp-command`). buzz-agent keys
+  its tool registry by server name, so a collision silently shadows one
+  server's tools.
+- **Unknown fields are rejected** — a typo'd `envs` would otherwise be dropped
+  in silence.
+- Error messages never echo the value; it carries per-server credentials. The
+  startup summary logs server **names** only.
 
 ### Parallel Agents & Heartbeat
 
