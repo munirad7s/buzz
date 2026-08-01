@@ -1659,3 +1659,59 @@ Dazu die Alters-Regel: ein Snapshot älter als 12 h behält seine Zahl, wird abe
 | Gates | `pnpm check` (desktop + web) ✅ · `pnpm typecheck` ✅ · `vite build` ✅ · `cargo fmt --all --check` ✅ · `cargo clippy` desktop-tauri ohne neue Warnung |
 
 **Offene Lücke, ehrlich benannt:** Der gerenderte Screenshot aus der laufenden App fehlt. Die isolierte Dev-Instanz baut und startet von diesem Branch (Onboarding-Screen belegt), aber eine **frische** Dev-Instanz landet im 7-Schritt-Onboarding — der Weg bis zum Tab war im Zeitbudget nicht zu Ende zu gehen. Wer ihn geht: `~/.buzz-dev` ist der Nest der Dev-Instanz, dort müssen `cockpit.json` und `cockpit-snapshot.sh` liegen; ohne `cockpit.json` ist die Rot-Probe geschenkt.
+
+## Stille Fehler, Runde 2: Wo „grün" nichts beweist (2026-08-01)
+
+Die zweite Jagd durchsuchte die Bereiche, die Runde 1 nicht angefasst hatte: Backups, Zahlungs-Webhooks, Cloudflare-Pages-Deploys, GitHub-Actions, den EspoCRM-Schreibpfad und die Server-Crons. Vier Muster sind allgemein genug, um für jedes künftige System zu gelten.
+
+### Ein Abo erbt den Webhook der Erstzahlung nicht
+
+Mollie schickt den Webhook einer `first`-Zahlung **nicht** an das daraus entstandene Abo weiter — `webhookUrl` ist am Subscription-Objekt eigens zu setzen. Gemessen: das einzige laufende Abo des Hauses (49,99 EUR/Monat, nächste Abbuchung 2026-09-01) hatte `webhookUrl: null`, und zwei von drei Abo-Erzeugungspfaden in n8n bauen den POST-Body ohne dieses Feld. Ein gescheiterter SEPA-Einzug hätte niemanden erreicht.
+
+Der Gegenbeweis, dass es eine Auslassung und kein Design war, kam aus dem eigenen Haus: `[social-poster] Onboarding API` setzt das Feld korrekt, die Agentur- und FOERDERWERK-Pfade nicht. **Regel: Bei jedem wiederkehrenden Zahlungsweg das erzeugte Objekt zurücklesen und prüfen, ob es einen Rückkanal trägt — nicht den Code lesen, der es erzeugt hat.** Ticket agency-infra#142.
+
+### Ein `errorTrigger` ist kein globaler Abfang
+
+n8n-Fehlerworkflows feuern **ausschließlich** für Workflows, die sie in `settings.errorWorkflow` eintragen. Gemessen: 21 von 83 aktiven Workflows hatten den Eintrag nicht — darunter der Bezahl-Checkout, der Lead-Eingang und der ACL-Drift-Wächter aus buzz#28. Einer zeigte auf einen Error-Workflow, der **inaktiv** ist: in der UI konfiguriert, in der Wirkung nichts.
+
+Der Beweis lief in beide Richtungen an echten Executions, und genau so gehört er geführt:
+
+```
+141248|vK7GzYSEJpw0Oiu0|error  |2026-08-01 10:58:47.711+00   <- MIT errorWorkflow
+141249|HKTf8UJnjSkWiRQg|success|2026-08-01 10:58:49.501+00   <- Sentinel 1,8 s später
+```
+gegen: `ci7Z4igomhDJCNFY` scheitert 06:00:00 — im Fenster 05:55–06:10 **null** Sentinel-Executions.
+
+**Regel: Ein Alarm-Kanal ist erst bewiesen, wenn ein Fehler-Zeitstempel und ein Alarm-Zeitstempel nebeneinanderliegen.** Ticket agency-infra#143.
+
+### Ein Backup ohne Empfänger und ohne Rückspielung ist eine Hoffnung mit Zeitstempel
+
+Das verschlüsselte Google-Drive-Vollbackup (systemd-Timer, täglich) hat: kein `OnFailure=`, keinen Kuma-Monitor, keine Telegram-/Mail-Meldung. Sein einziges Ergebnis-Artefakt ist `/var/lib/full-server-backup/last-status` — und `grep -rl` über `/opt`, `/usr/local/sbin`, `/etc/cron.d`, `/etc/systemd/system` zeigt: außer dem Skript selbst liest das niemand.
+
+Die Rot-Probe musste nicht simuliert werden, sie lag im Journal: am 2026-07-26 19:10:09 scheiterte der Dienst mit `result 'signal'` — folgenlos. **Ein Detektor, der seine Gelegenheit hatte und sie nicht genutzt hat, ist widerlegt, nicht verdächtig.**
+
+Dazu die Abgrenzung, die man beim Zählen von „Backup-Monitoren" leicht übersieht: `verify-backup.sh` (agency-infra#32) ist gute Arbeit, prüft aber `RESTIC_REPOSITORY` aus `backup.env` — das **lokale** Repo auf derselben Platte. Für das Offsite-Repo existiert kein einziger Restore. `restic check --read-data-subset` beweist Blob-Integrität, nicht Wiederherstellbarkeit: er sagt nichts über den `rclone`-Zugang, über die Verfügbarkeit des Repo-Passworts außerhalb des Hosts und über einen durchlaufenden `pg_restore`. Ticket agency-infra#145.
+
+### Die Frage „wer schreibt das eigentlich" beantwortet der Zeitstempel, nicht das Credential-Inventar
+
+buzz#29 hatte notiert, `claude-mcp-admin` schreibe aktiv ins CRM, „der Consumer sitzt außerhalb von n8n und ist unbekannt". Gefunden wurde er in zwei Schritten: die neuesten Leads nach `createdById` und `createdAt` sortieren (04:15:36), dann in `/etc/cron.d` nachsehen, was um 04:15 läuft (`agency-crm-sync` → `batch-ingest.sh` mit eigener Zugangsdatei). Bestätigt durch `GET /App/user` mit genau diesem Key → `userName=claude-mcp-admin`.
+
+**Regel: Ein unbekannter Schreiber ist über den Zeitstempel seiner Schreibungen fast immer identifizierbar. Die Zugangs-Inventare durchsucht man erst, wenn das nicht greift.**
+
+### Widerlegt statt gemeldet (vier Verdachtsfälle)
+
+Das gehört genauso ins Protokoll wie die Funde — jeder davon hätte ein plausibles, falsches Ticket ergeben:
+
+| Verdacht | Warum er fiel |
+|---|---|
+| Cloudflare-Pages: `adas.casa` steht im Pages-Projekt auf `deactivated` | `curl https://adas.casa` → **301 auf `www.adas.casa`**, dahinter HTTP 200. Der Apex läuft absichtlich über den `agency-apex-redirect`-Container, nicht über Pages. |
+| Deployte Commit-SHAs weichen von `main` ab | Die Abweichungen waren 5–7 Minuten alt, an einem Tag, an dem mehrere Agenten pushten. Ein bewegtes Ziel ist kein Befund — hier gilt derselbe Vorbehalt wie bei „der lokale Arbeitsbaum lügt". |
+| Stripe-Webhooks laufen ins Leere | Endpunkt `we_…` ist `enabled`, zeigt auf `n8n.adas.jetzt/webhook/mondsamt-paid`, und der empfangende Workflow `[MONDSAMT] paid` hat 14 `production_success`. Stripe hat **null** Subscriptions — dort gibt es keine wiederkehrende Strecke, die blind sein könnte. |
+| Zwei aktive n8n-Workflows haben **nie** einen `production_success` | Nur einer ist ein Befund. `[social-poster] subscription-janitor` wurde am selben Tag um 09:45 angelegt, sein erster Cron-Lauf stand noch aus. **Vor „läuft nie" immer `createdAt` gegen die Schedule-Periode halten.** |
+
+### Handwerk (Runde 2)
+
+- **`workflow_statistics` ist die prune-feste Quelle** — die Execution-Historie reicht nur ~3,4 Tage (adas-empire#85). Für „lief das je?" gehört die Tabelle abgefragt, nicht `/api/v1/executions`. Zugang: `ssh hetzner "docker exec -i postgresql-m12c6fi640vm8lgeuxrl4evo psql -U infzUTjDXmlo65b3 -d n8n ..."` — der n8n-Container heißt **nicht** `agency-n8n`, und die DB liegt **nicht** in `agency-postgres`.
+- **`gh run list` ist blind für Repos ohne Workflows.** Ein leeres Ergebnis heißt „kein CI", nicht „CI kaputt". Die Gegenprobe ist `GET /repos/{o}/{r}/actions/workflows` plus `total_count` der Runs.
+- **Ein in der Workflow-YAML referenzierter Name beweist nicht, dass der Wert gesetzt ist** — `GET /repos/{o}/{r}/actions/secrets` beweist es. Skripte, die ohne den Wert still zum No-op werden (`[ -n "${TOKEN:-}" ] || return 0`), sind sonst grün und wirkungslos.
+- **Der Berichts-Vorbehalt:** Dass eine Zahl irgendwo im Morgenbrief auftaucht, macht sie nicht zu einem Wächter. `lagebild.sh` hätte einen fehlgeschlagenen Einzug als Zähler gezeigt — ohne Kunde, ohne Aktion, ohne Alarm. Beim Bewerten eines Fundes gehört diese Teil-Mitigation benannt, aber sie entkräftet ihn nicht.
