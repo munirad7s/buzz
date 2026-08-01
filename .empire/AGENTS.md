@@ -909,3 +909,83 @@ Der Wächter aus buzz#28 steht für diesen User jetzt auf **guarded** statt repo
 `block_backlog` liest nicht mehr nur `priorities.json`, sondern die **Vereinigung** aus Liste und den Repos, in denen eine owner-weite Suche `ready`/`blocked-munir`/`in-progress` sieht. Gemessen: drei Repos mit echten Empire-Tickets (`agency-handoff` mit einem P1-money-Epic und einem `blocked-munir`, `make_meony_no_shit`, `azubi-swipe-connect`) standen in keiner Zeile — `blocked` sprang von 82 auf 87.
 
 Die Nachzügler werden als `repos_untracked` **namentlich** gemeldet und setzen den Block auf `warn`. Sie zählen mit (die Zahl ist vollständig), aber die Liste soll nachgepflegt werden statt still zu veralten — deshalb ändern sie den Exit-Code nicht, `repos_unreadable` und `repos_truncated` dagegen schon. `LAGEBILD_REPOS` schaltet die Entdeckung bewusst ab, sonst wäre die Rot-Probe „Repo unlesbar" nicht mehr durchführbar.
+
+## Eigener Codex-Kontext für den Buzz-`codex`-Agenten (buzz#40 — config-only)
+
+**Entschieden: Weg (b) — der Buzz-`codex`-Agent bekommt ein eigenes `CODEX_HOME` (`~/.codex-buzz`) mit schlanker `config.toml`; die Token-Datei ist ein Hardlink auf Munirs.** Munirs interaktives `~/.codex` bleibt vollständig unangetastet — es wurde nicht aufgeräumt, sondern *verlassen*.
+
+### Der gemessene Ausgangszustand (derselbe Prompt, dieselbe Messstrecke)
+
+Der Agent erbte Munirs komplette interaktive Konfiguration: 26 `mcp_servers`, 40 `plugins`. Reproduktion mit `codex exec --json`, Ereignisse einzeln zeitgestempelt:
+
+| Messgröße | Munirs `~/.codex` | `~/.codex-buzz` |
+|---|---|---|
+| Zeit Prompt → `turn.started` | **105,6 s** | **1,4 s** |
+| Gesamtlauf bis Modellantwort | 205,5 s | 4,6 s |
+| `rmcp::transport::worker … AuthRequired` | **18** | **0** |
+| `OAuth token refresh failed: invalid_grant` | 1 | 0 |
+| `Exceeded skills context budget` | 1 — *„All skill descriptions were removed and 61 additional skills were not included"* | 0 — *„Codex can still see every skill"* |
+
+Und auf dem **echten Agentenpfad** (nicht der CLI): `%APPDATA%\Buzz\node-tools\codex-acp.cmd` direkt über stdio, `initialize` → `session/new`, danach 120 s Nachlauf, Engine-Log über `APP_SERVER_LOGS`:
+
+| Messgröße | geerbtes `~/.codex` | `CODEX_HOME=~/.codex-buzz` |
+|---|---|---|
+| `session/new` | 4,59 s | **1,52 s** |
+| `AuthRequired`-Fehler im Engine-Log | **16** | **0** |
+
+Beides ist **kontingentunabhängig** gemessen: die MCP-Verbindungen und die Skill-Budget-Rechnung passieren vor dem Modellaufruf. Das Abo-Kontingent ist bis 08.08. 09:14 leer (buzz#18) — der Lauf endet danach mit `usageLimitExceeded`, aber alle vier Messgrößen stehen zu diesem Zeitpunkt bereits fest.
+
+### Warum die anderen beiden Wege ausscheiden
+
+- **(a) `agent_args` mit `-c mcp_servers={}` — technisch unmöglich, nicht nur unschön.** Buzz *würde* mitspielen: `normalize_agent_args` reicht explizite Args unverändert durch (Unit-Test `preserves_explicit_nonempty_agent_args` in `crates/buzz-acp/src/config.rs` benutzt genau `["-c", "model=…"]`), und `codex-acp.cmd` hängt `%*` an. Der Adapter selbst wirft sie weg: in `dist/index.js` kennt der Einstieg nur `--version`, `argv[2] == "login"` und `argv[2] == "cli"`; jeder andere Aufruf landet in `startAcpServer()`, und das liest ausschließlich **Env**: `CODEX_PATH`, `CODEX_CONFIG`, `MODEL_PROVIDER`, `DEFAULT_AUTH_REQUEST`. Ein `-c …` erreicht die Engine nie.
+- **(c) Munirs `config.toml` aufräumen — abgelehnt, obwohl es wirken würde.** Es wirkt für beide Seiten, aber es beschneidet ein produktives Setup, um ein Agentenproblem zu lösen. Die tote OAuth-Verbindung ist für Munir interaktiv ein Achselzucken (er klickt sich neu ein), für den headless-Agenten ein Totalausfall. Getrennte Kontexte lösen beide Fälle; ein gemeinsamer, gekürzter Kontext löst keinen richtig.
+- **`CODEX_CONFIG` (JSON-Env) als Alternative innerhalb von (b)** wäre gegangen — der Adapter merged es in `session/new`. Verworfen, weil buzz-acp dieselbe Variable bereits für die Sandbox-Netzfreigabe belegt und deep-merged (`build_codex_config_env` in `crates/buzz-acp/src/acp.rs`): zwei Schreiber auf einer Variable, deren Präzedenz man bei jedem Upstream-Merge neu prüfen müsste. `CODEX_HOME` hat genau einen Schreiber.
+
+### Wo was liegt und wie es verdrahtet ist
+
+| Baustein | Ort |
+|---|---|
+| Agenten-Home | `~/.codex-buzz/` — `config.toml` (schlank), `skills/`, `sessions/` |
+| Anmeldung | `~/.codex-buzz/auth.json` = **Hardlink** auf `~/.codex/auth.json` (eine Datei, zwei Namen) |
+| Verdrahtung | `%APPDATA%\xyz.block.buzz.app\agents\managed-agents.json` → beide `codex`-Records (Definition + laufende Instanz) tragen `env_vars: {"CODEX_HOME": "C:\\Users\\rescue\\.codex-buzz"}` |
+| Wiederherstellung + Wächter | `.empire/tools/codex-agent-home.sh` (`setup` \| `verify`) — das Home liegt außerhalb des Repos, das Script ist die Quelle |
+| Sicherungen | `managed-agents.json.bak-buzz40-<ts>`, `~/.codex/config.toml.bak-buzz40-<ts>` |
+
+Der Weg der Variable ist im Code belegt: die Desktop-Spawn-Schicht legt `descriptor.env` (Baked-Floor → Runtime-Metadaten → Definition → global → Persona → **per-Agent `env_vars`**) als Letztes auf das Kommando (`desktop/src-tauri/src/managed_agents/runtime.rs`, „User env vars"-Block), `CODEX_HOME` steht nicht in `RESERVED_ENV_KEYS`, `AcpClient::spawn` vererbt die Umgebung an `codex-acp`, und der Adapter startet die Engine mit `spawn(..., { env: process.env })`.
+
+### Warum Hardlink und nicht Kopie — und was bei `codex login` passiert
+
+Eine kopierte Anmeldedatei erneuert sich nicht mit: die Engine schreibt das erneuerte Token in **ihr** `CODEX_HOME`, und die zweite Kopie altert still bis zum `invalid_grant`. Der Hardlink macht beide Namen zu **einer** Datei — wer auch immer erneuert, beide sehen es.
+
+Zwei Betriebsregeln folgen daraus:
+
+1. **Nach jedem `codex login`** (und nach allem, was die Datei ersetzt statt beschreibt) `bash .empire/tools/codex-agent-home.sh verify` laufen lassen. Meldet es „KEIN Hardlink mehr", stellt `setup` ihn wieder her (die verwaiste Datei wird als `*.stale-<ts>` beiseitegelegt, nie gelöscht).
+2. **Der Fehlermodus ist laut, nicht leise.** Bricht der Link, läuft das Agenten-Token ab und der Agent meldet `Not logged in` bzw. 401 — er antwortet nicht still falsch. Ob die Codex-Engine die Datei ersetzt oder beschreibt, ist **nicht gemessen** (seit 27.07. keine Erneuerung passiert); deshalb der Wächter statt einer Behauptung.
+
+### Welche MCP-Server der `codex`-Agent bekommt: vorerst keine
+
+Ausgangspunkt war die Nest-Auswahl aus buzz#4 (`~/.buzz/.mcp.json`: `google-mcp`, `telegram-mcp`, `espo-mcp`, `obsidian-mcp-tools`, `n8n-api`). Übernommen wurde **keiner** — mit Begründung, nicht aus Bequemlichkeit:
+
+- Die Nest-Auswahl ist die **Dispatcher-Ausstattung** (Mail lesen, CRM lesen, Kanal melden). Der `codex`-Strang ist laut Kosten-Routing der **Builder/Reviewer** — sein Werkzeug ist die Shell, und die Empire-Werkzeuge (`gate.sh`, `vault-log.sh`, `lagebild.sh`, `gh`, `rtk`) sind Shell-Skripte, keine MCP-Tools.
+- `~/.buzz/.mcp.json` ist Claude-Code-Projekt-Scope. Codex liest die Datei gar nicht — die fünf Server müssten in `config.toml` **dupliziert** werden. Ein zweiter Ort für dieselbe Wahrheit ist genau der Doppelbau, den Doktrin 3 verbietet.
+- Was der Agent im Kanal braucht, bekommt er ohnehin: buzz-acp reicht `buzz-cli` als MCP-Subprozess über `session/new` durch — unabhängig von `config.toml`.
+- Alle fünf Nest-Server sind stdio-lokal und könnten **keinen** `AuthRequired`-Fehler erzeugen. Sie kosten aber je einen Node-Start pro Session. Bei Bedarf werden sie einzeln nachgetragen — die Regel ist „aus gemessenem Bedarf", nicht „vorsichtshalber alle".
+
+Skills analog: statt 61 verworfener Beschreibungen liegen sechs Junctions in `~/.codex-buzz/skills/` (`review`, `fix-issue`, `deploy-check`, `explain`, `brain`, `markdown-converter`) plus das von Codex selbst angelegte `.system/`. Der Agent sieht damit wieder Skills — und zwar die, die zur Rolle passen.
+
+### Beweisstand (2026-08-01)
+
+| # | Prüfung | Ergebnis |
+|---|---|---|
+| 1 | `AuthRequired` im Agenten-Kontext | **0** (vorher 18 CLI / 16 Adapter) |
+| 2 | `Exceeded skills context budget` | **0**, Skills sichtbar |
+| 3 | Prompt → `turn.started` | **1,4 s** (< 20 s gefordert) |
+| 4 | **Rot-Probe** — dieselbe Messstrecke gegen `~/.codex` | Fehler und Warnung sofort wieder da (205,5 s, 18, 1) |
+| 4b | **Rot-Probe Wächter** — Kopie statt Hardlink · Home fehlt | je Exit 1 mit benanntem Grund; grüner Lauf Exit 0 |
+| 5 | Gegenprobe Munir-Setup | `codex login status` → „Logged in using ChatGPT"; `config.toml` **byte-identisch** wieder bei 17.891 Bytes, 26 mcp_servers, 40 plugins |
+| 6 | Kanal-Beweis `@codex` in `#build` | **offen — braucht Abo-Kontingent (Reset 08.08. 09:14, buzz#18)** |
+
+**Zwei Dinge, die nicht behauptet werden:**
+
+- Die Messung selbst hat Munirs `config.toml` verändert: `codex exec` trägt für jedes neue Arbeitsverzeichnis still einen `[projects.…]`-Trust-Eintrag nach (+144 Bytes). Der Eintrag wurde **entfernt**, die Datei steht wieder exakt auf ihren 17.891 Ausgangsbytes. Wer in fremden `CODEX_HOME`s misst, verändert sie — das ist kein Nebensatz, sondern der Grund, warum die Gegenprobe zur Pflicht gehört.
+- Der **laufende** Agent hat das neue Home noch nicht: die Desktop-Instanz startete um 12:38 und schreibt bis heute in `~/.codex/sessions/` (12 Rollout-Dateien seit 12:30, davon 10 aus dem Pool-Start um 13:45). `env_vars` wird beim **nächsten Start** gelesen; ein Neustart hätte die produktive App bedienen müssen und wurde deshalb nicht erzwungen. Der Detektor dafür ist einzeilig: nach dem nächsten Start liegen die Rollouts unter `~/.codex-buzz/sessions/` und `~/.codex/sessions/` wächst nicht mehr mit.
