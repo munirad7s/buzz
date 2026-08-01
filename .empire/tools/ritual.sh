@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ritual.sh — die beiden Führungsrituale auf echten Daten (buzz#10)
 #
-#   morgenbrief  08:45 Europe/Berlin — 5 Blöcke: Top-3 · Inbox · Lage (inkl.
-#                Werkzeugbestand aus nest-doctor.sh, buzz#59) · Entscheidungen · Lücken
+#   morgenbrief  08:45 Europe/Berlin — 6 Blöcke: Top-3 · Termine (buzz#62) · Inbox ·
+#                Lage (inkl. Werkzeugbestand aus nest-doctor.sh, buzz#59) ·
+#                Entscheidungen · Lücken
 #   gate-batch   20:45 Europe/Berlin — alle offenen blocked-munir als Ein-Zeilen-Entscheidungen
 #
 # Aufruf:
@@ -194,6 +195,32 @@ collect_inbox() {
   return 0
 }
 
+# (c2) Termine — google-mcp/calendar_events über denselben Adapter (buzz#62).
+# Bis dahin stand hier eine harte Lücken-Zeile: der Kalender lief nur über den
+# claude.ai-Connector und war für ein Script nicht erreichbar. Nur lesend —
+# es existiert kein Tool, das einen Termin anlegt oder verschiebt.
+collect_calendar() {
+  local out from to
+  # Fenster = jetzt bis morgen früh 06:00 Ortszeit: der Brief kommt 08:45 und
+  # soll den ganzen Tag zeigen, nicht nur die nächsten 24 h ab Sendezeit.
+  from="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  to="$(date -u -d 'tomorrow 06:00' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v+1d '+%Y-%m-%dT06:00:00Z')"
+  if ! out="$(node "$HERE/mcp-call.mjs" --server google-mcp --tool calendar_events \
+              --config "$MCP_CONFIG" --timeout 90000 \
+              --args "{\"calendarId\":\"ALL\",\"timeMin\":\"$from\",\"timeMax\":\"$to\",\"maxResults\":40}" \
+              2>"$TMP/cal.err")"; then
+    gap "Termine (Kalender via google-mcp) nicht erhoben: $(head -c 140 "$TMP/cal.err" | tr -d '\n')"
+    return 1
+  fi
+  printf '%s' "$out" | jq -e '.events' >/dev/null 2>&1 || {
+    gap "Kalender lieferte kein verwertbares Ergebnis (Antwort ohne .events)"; return 1; }
+  printf '%s' "$out" > "$TMP/cal.json"
+  # Ein einzelner unlesbarer Kalender darf nicht wie ein leerer Tag aussehen.
+  local bad; bad="$(jq -r '.unreadable|length' "$TMP/cal.json")"
+  [ "$bad" -gt 0 ] && gap "Kalender unvollständig — $bad Kalender nicht lesbar (die Terminliste ist eine Untermenge)"
+  return 0
+}
+
 # (d2) Werkzeugbestand — buzz#59. Ein Führungs-Agent, der glaubt ein Werkzeug zu
 # haben, das er nicht hat, improvisiert — und improvisierte Führung ist falsche
 # Führung. Genau das war in buzz#3 wochenlang unsichtbar: drei "verdrahtete"
@@ -272,7 +299,33 @@ render_morgenbrief() {
       [ -n "$tm" ] && { printf '   ältestes offenes P1-money (Backlog):\n'; printf '%s\n' "$tm"; }
     fi
 
-    printf '\n**2) Inbox** (m.muniradas@gmail.com, letzte 24 h)\n'
+    printf '\n**2) Termine heute** (alle lesbaren Kalender, bis morgen 06:00)\n'
+    if [ -f "$TMP/cal.json" ]; then
+      local nev; nev="$(jq -r '.events|length' "$TMP/cal.json")"
+      if [ "$nev" -eq 0 ]; then
+        if [ "$(jq -r '.unreadable|length' "$TMP/cal.json")" -gt 0 ]; then
+          printf '   ⚠️ 0 in den LESBAREN Kalendern — nicht alle waren lesbar (siehe Block 6)\n'
+        else
+          printf '   keine Termine im Fenster\n'
+        fi
+      else
+        printf '   %s Termine:\n' "$nev"
+        # Ganztägige zuerst: Klausuren, Fristen und Urlaube stehen dort, und ein
+        # "ganztägig" ohne Uhrzeit sähe sonst wie 00:00 aus.
+        jq -r '
+          [.events[]|select(.allDay)] as $a |
+          [.events[]|select(.allDay|not)] as $t |
+          ([$a[]| "   ▪ ganztägig — " + (.summary|.[0:70]) + " (" + (.calendar|.[0:22]) + ")"]
+           + [$t[]| "   ▪ " + (.start|.[11:16]) + " — " + (.summary|.[0:70])
+                    + (if .location then " @" + (.location|.[0:28]) else "" end)])[0:12] | .[]
+        ' "$TMP/cal.json" | tr -d "$CR"
+        [ "$nev" -gt 12 ] && printf '   … und %s weitere\n' "$((nev-12))"
+      fi
+    else
+      printf '   ⚠️ LÜCKE — Kalender nicht erhoben (siehe Block 6)\n'
+    fi
+
+    printf '\n**3) Inbox** (m.muniradas@gmail.com, letzte 24 h)\n'
     if [ -f "$TMP/inbox.json" ]; then
       local total unread mark=""
       total="$(jq -r '.messages|length' "$TMP/inbox.json")"
@@ -289,10 +342,10 @@ render_morgenbrief() {
         [ "$unread" -gt 6 ] && printf '   …und %s weitere ungelesene\n' "$((unread-6))"
       fi
     else
-      printf '   ⚠️ LÜCKE — Inbox nicht erhoben (siehe Block 5)\n'
+      printf '   ⚠️ LÜCKE — Inbox nicht erhoben (siehe Block 6)\n'
     fi
 
-    printf '\n**3) Lage** (Quelle: `.empire/tools/lagebild.sh`)\n'
+    printf '\n**4) Lage** (Quelle: `.empire/tools/lagebild.sh`)\n'
     if [ -f "$TMP/lage.json" ]; then
       jq -r '
         def st(x): if x == "ok" then "" elif x == "warn" then " ⚠️" else " ❌" end;
@@ -318,7 +371,7 @@ render_morgenbrief() {
              + ((.pay.last30_failed_after_method // 0)|tostring) + " nach Methodenwahl gescheitert)" else empty end)
         ] | .[]' "$TMP/lage.json" | tr -d "$CR"
     else
-      printf '   ⚠️ LÜCKE — Lagebild nicht erhoben (siehe Block 5)\n'
+      printf '   ⚠️ LÜCKE — Lagebild nicht erhoben (siehe Block 6)\n'
     fi
     if [ -f "$TMP/nest.json" ]; then
       jq -r '
@@ -332,15 +385,15 @@ render_morgenbrief() {
         + (if .process_drift == "ja" then " · Agenten laufen mit ALTEM Werkzeugkasten (Neustart im Desktop nötig)" else "" end)
       ' "$TMP/nest.json" | tr -d "$CR"
     else
-      printf '   Werkzeuge: ⚠️ LÜCKE — Nest-Doctor nicht erhoben (siehe Block 5)\n'
+      printf '   Werkzeuge: ⚠️ LÜCKE — Nest-Doctor nicht erhoben (siehe Block 6)\n'
     fi
 
-    printf '\n**4) Deine Entscheidungen** (offene `blocked-munir`)\n'
+    printf '\n**5) Deine Entscheidungen** (offene `blocked-munir`)\n'
     if [ -f "$TMP/blocked.json" ]; then
       local nb; nb="$(jq -r 'length' "$TMP/blocked.json")"
       if [ "$nb" -eq 0 ]; then
         if grep -q 'nicht lesbar\|am Limit\|lieferte nichts' "$GAPFILE" 2>/dev/null; then
-          printf '   ⚠️ 0 in den lesbaren Repos — nicht alle waren lesbar (siehe Block 5)\n'
+          printf '   ⚠️ 0 in den lesbaren Repos — nicht alle waren lesbar (siehe Block 6)\n'
         else
           printf '   keine offenen Blocker\n'
         fi
@@ -350,11 +403,10 @@ render_morgenbrief() {
         printf '   voller Batch heute 20:45\n'
       fi
     else
-      printf '   ⚠️ LÜCKE — blocked-munir nicht erhoben (siehe Block 5)\n'
+      printf '   ⚠️ LÜCKE — blocked-munir nicht erhoben (siehe Block 6)\n'
     fi
 
-    printf '\n**5) Lücken** (bewusst benannt, nie als 0 verbucht)\n'
-    printf '   • Kalender: n/a — headless nicht angebunden (claude.ai-Connector); Folge-Ticket\n'
+    printf '\n**6) Lücken** (bewusst benannt, nie als 0 verbucht)\n'
     if [ -s "$GAPFILE" ]; then
       sed 's/^/   • /' "$GAPFILE"
     else
@@ -482,6 +534,7 @@ case "$MODE" in
     collect_foki
     collect_lagebild "backlog,n8n,server,pay"
     collect_nest
+    collect_calendar
     collect_inbox
     collect_blocked
     BRIEF="$(render_morgenbrief)"

@@ -720,7 +720,7 @@ Exit-Codes beantworten nur die Erhebung: `0` vollständig · `1` mit benannten L
 | Vault-Tagesnotiz | je Ritual eine Zeile über `~/.buzz/vault-log.sh` (buzz#11) |
 | Scheduler | Windows-Aufgaben `Buzz-Ritual-Morgenbrief` / `Buzz-Ritual-Gate-Batch`, Timing durch vorgezogenen Trigger live bewiesen |
 
-**Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector). Er steht als benannte Lücke im Brief — nicht weggelassen. Folge-Ticket buzz#62. Drittes Ritual (Wochen-Review So 18:00): buzz#63.
+~~**Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector).~~ **Erledigt mit buzz#62** — der Brief hat seit dem 01.08. einen echten Block „2) Termine heute"; die Blöcke sind entsprechend 1–6 statt 1–5. Drittes Ritual (Wochen-Review So 18:00): buzz#63.
 
 ## ⚖️-Marker werden Entscheidungs-Entwürfe (buzz#42 — `.empire/tools/decision-drafts.sh`)
 
@@ -1246,3 +1246,34 @@ Zweite, harmlosere Falle: die `.cmd`-Startrampe schreibt echtes UTF-8 ins Log; `
 | **Scheduler live** | `schtasks /run` → Aufgabe „Letztes Ergebnis: 0", Log-Zeile `exit=0`, und ein **frischer** Heartbeat in Kuma 2 s später (Zähler 2 → 3). Nächster regulärer Lauf 02.08. 07:10 |
 
 **Langzeitbeweis:** ergibt sich aus der Kuma-Historie des Monitors — kein zusätzliches Ritual nötig. Bleibt der Monitor bis Ende August grün, ist der Production-Consent belegt; stirbt der Token, steht die Ursache mit Re-Auth-Kommando im Alarm.
+
+## Kalender headless (buzz#62 — der Morgenbrief hat keine Kalender-Lücke mehr)
+
+**Entschieden: zwei nur-lesende Tools im bestehenden `google-mcp` statt eines neuen Servers oder einer n8n-Bridge.**
+
+**Der Vorflug hat den teuersten Schritt gestrichen:** Das Ticket verlangte, `calendar.readonly` zu ergänzen und einen Re-Consent zu fahren (Browser, also potenziell Munir-abhängig). Gemessen am echten Token: der Scope war **längst gewährt** — er steht seit jeher in `src/auth.ts`, und `calendarList`/`events` antworten mit HTTP 200. Es fehlte nur das Tool. Dasselbe Muster wie bei `gmail.compose` in buzz#32: **erst messen, was der Token kann, dann bauen.** Kein Re-Consent, kein Blocker.
+
+| Baustein | Ort |
+|---|---|
+| Tools `calendar_list_calendars` / `calendar_events` | `munirad7s/google-mcp`, `src/tools/calendar.ts` |
+| E2E | `test/calendar-e2e.mjs` (8/8) |
+| Brief-Block „2) Termine heute" | `.empire/tools/ritual.sh` — Sammler `collect_calendar()` |
+
+### Guardrail und Grenzen
+
+- **Kein Schreib-Tool.** Ein Termin im Namen des Besitzers ist eine Verpflichtung gegenüber Dritten und damit GATED nach `.empire/POLICY.md`. Es gibt kein create/update/delete — und der Scope `calendar.readonly` könnte es auch dann nicht, wenn ein Tool es wollte. Hier greifen beide Schichten wirklich.
+- **Ganztägige Termine tragen `date`, getaktete `dateTime`.** Wer nur `dateTime` liest, verliert genau die Klausur- und Fristen-Einträge, wegen derer der Block existiert. Der Brief zeigt sie zuerst und als „ganztägig", nicht als 00:00.
+- **`timeMin` filtert nach Ende, nicht nach Anfang.** Ein mehrtägiger Eintrag, der vor dem Fenster begann, erscheint korrekt — er läuft ja noch.
+- **Ein unlesbarer Kalender ist eine benannte Lücke**, nie ein leerer Tag: `calendar_events` liefert `unreadable[]` + `note`, und `ritual.sh` macht daraus eine Zeile in Block 6.
+- **Der Brief hat jetzt 6 Blöcke** (Termine ist der neue Block 2). Alle „siehe Block 5"-Verweise wurden auf Block 6 gezogen.
+
+### Beweisstand (2026-08-01, live)
+
+| Schritt | Beweis |
+|---|---|
+| Vorflug | Token trägt `calendar.readonly` bereits; `calendarList` 200 (12 Kalender), `events` 200 |
+| E2E | `node test/calendar-e2e.mjs` → **8/8**: Tool-Surface, kein Schreib-Tool, 12 Kalender, 100 Termine/7 Tage, ganztägig **und** getaktet, aufsteigend sortiert |
+| **Detektor rot (Tool)** | nicht existierender Kalender → 0 Termine **plus** `unreadable=1` + `note` · Müll-Zeitstempel → Fehler statt stillem Default |
+| Live über den Nest | `mcp-call.mjs --server google-mcp --tool calendar_events` → 12 Kalender, 30 Termine, 0 unlesbar |
+| Brief echt | Block „2) Termine heute" mit 20 realen Terminen, ganztägig zuerst, Uhrzeit + Ort |
+| **Detektor rot (Brief)** | MCP-Config verbogen → „⚠️ LÜCKE — Kalender nicht erhoben (siehe Block 6)" und die Ursache namentlich in Block 6 — **nicht** „keine Termine" |
