@@ -156,7 +156,7 @@ block_backlog() {
     (
       slug="$(printf '%s' "$repo" | tr '/' '~')"
       if out="$(gh issue list -R "$repo" --state open -L "$REPO_LIMIT" \
-                  --json number,title,labels,createdAt 2>"$TMP/repos/$slug.err" </dev/null)" \
+                  --json number,title,labels,createdAt,url 2>"$TMP/repos/$slug.err" </dev/null)" \
          && [ -n "$out" ]; then
         printf '%s' "$out" | jq --arg repo "$repo" '{repo:$repo, issues:.}' > "$TMP/repos/$slug.json" 2>/dev/null \
           || rm -f "$TMP/repos/$slug.json"
@@ -188,7 +188,7 @@ block_backlog() {
     . as $repos
     | ($repos | map(select((.issues|length) >= $limit) | .repo)) as $truncated
     | ($repos | map(.issues[] as $i | {repo:.repo, number:$i.number, title:$i.title,
-                                       createdAt:$i.createdAt,
+                                       createdAt:$i.createdAt, url:$i.url,
                                        labels:($i.labels|map(.name))})) as $issues
     | ($issues | map(select(.labels|index("ready")))) as $ready_all
     | ($ready_all | map(select((.labels|index("blocked-munir"))|not))) as $ready
@@ -224,6 +224,20 @@ block_backlog() {
         top_money: ($ready | map(select(.labels|index("P1-money")))
                     | sort_by(.createdAt) | .[0:3]
                     | map({repo, number, title})),
+        # Die aeltesten offenen Munir-Gates, nach Prio dann Alter — dieselbe
+        # Sortierung wie ritual.sh gate-batch, aber aus den Issues, die dieser
+        # Block ohnehin schon geholt hat (kein zusaetzlicher API-Aufruf, kein
+        # Doppelbau der Sammel-Logik). Verbraucher: Cockpit-Kachel "Gates" (#15).
+        top_blocked: ($issues | map(select(.labels|index("blocked-munir")))
+                    | sort_by( (if (.labels|index("P1-money")) then 0
+                                elif (.labels|index("P1")) then 1
+                                elif (.labels|index("P2")) then 2 else 3 end), .createdAt )
+                    | .[0:3]
+                    | map({repo, number, title, url, createdAt,
+                           prio: (if (.labels|index("P1-money")) then "P1-money"
+                                  elif (.labels|index("P1")) then "P1"
+                                  elif (.labels|index("P2")) then "P2"
+                                  elif (.labels|index("P3")) then "P3" else "ohne" end)})),
         reason: (if ($unreadable|length) > 0 then "nicht lesbar: " + ($unreadable|join(", "))
                  elif ($untracked|length) > 0 then "nicht in priorities.json (mitgezaehlt, Liste nachpflegen): " + ($untracked|join(", "))
                  elif ($truncated|length) > 0 then "Limit erreicht (mögliche Truncation): " + ($truncated|join(", "))
