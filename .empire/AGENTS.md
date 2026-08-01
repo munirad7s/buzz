@@ -647,3 +647,75 @@ cp .empire/tools/vault-log.sh             ~/.buzz/vault-log.sh
 ```
 
 Der Projekteintrag in `~/.claude.json` liegt bewusst NICHT im Repo (Munirs Datei) — er muss nach einem Reset von Hand nachgezogen werden, sonst stehen alle Nest-Server wieder auf „Pending approval".
+## Führungsrituale auf echten Daten (buzz#10 — Morgenbrief 08:45 · Gate-Batch 20:45)
+
+**Entschieden: ein messendes Script (`.empire/tools/ritual.sh`) als einzige Inhaltsquelle, der Agent ist nur noch Transport.**
+
+Begründung: Ein Workflow kann ausschließlich `send_message`. Der Bestand vom 30.07. bestand deshalb aus reiner Prompt-Prosa („@claude erstelle das Briefing … lies den aktuellen Brain-Kontext") — das liefert, woran sich ein Modell erinnert, nicht was das System gerade tut. Das Ticket verlangt das Gegenteil. Also erhebt jetzt ein Script, und der Workflow-Text ist nur noch die Anweisung, genau dieses Kommando auszuführen und nichts zu ergänzen.
+
+### Der harte Vorflug-Befund: der Relay-Scheduler feuert nicht
+
+| Messung | Ergebnis |
+|---|---|
+| Bestand am 01.08. | Beide Workflows existieren seit 30.07. 22:20, `enabled: true`, Crons in UTC korrekt (`45 6` / `45 18`) |
+| Kanal-Historie `#general` (19 Nachrichten, vollständig) | **Kein einziger geplanter Lauf** — die einzige Workflow-Nachricht vor dem 01.08. stammt von einem manuellen Trigger am 30.07. 22:19 |
+| Verpasste Gelegenheiten | 31.07. 08:45 · 31.07. 20:45 · 01.08. 08:45 = 3 × nichts |
+| `workflows runs --workflow <id>` | liefert `[]` — **auch nach einem nachweislich erfolgreichen manuellen Trigger** (`run_id` in der Antwort, Nachricht im Kanal). Die Run-Liste ist also KEIN Beweismittel; wer daraus „nie gelaufen" schließt, misst das falsche Ding |
+| Direkte Probe | Workflow auf eine Zielminute 3 min in der Zukunft gesetzt (`accepted: true`), 6 min gepollt → **keine Nachricht**; danach sauber zurückgesetzt und der Revert verifiziert |
+
+Der Relay ist gehostet (`adaswin.communities.buzz.xyz`, `/health` = ok) — die Ursache liegt serverseitig und ist von hier nicht reparierbar (Kandidaten im Code: `check_owner_authority`, `list_all_enabled_workflows`). **Konsequenz: der tatsächliche Auslöser ist die Windows-Aufgabenplanung, die Buzz-Workflows bleiben als Kanal-Definition bestehen und greifen automatisch, sobald der Relay-Scheduler wieder feuert.** Beides zeigt auf dasselbe Kommando — kein Doppelbau, aber auch kein Ritual, das an einem kaputten Scheduler hängt. Folge-Ticket: buzz#55.
+
+**Nebeneffekt: das DST-Problem ist damit weg.** Die Aufgabenplanung rechnet in Ortszeit, 08:45 bleibt 08:45 — auch nach dem 25.10.2026. Die UTC-Crons in den Workflows tragen den Umstellungshinweis trotzdem in der `description` (`45 6` → `45 7`, `45 18` → `45 19`), damit sie beim Wiederanlaufen des Relay-Schedulers nicht eine Stunde daneben feuern.
+
+### Was das Script erhebt (alles gemessen, nichts abgeleitet)
+
+| Block | Quelle |
+|---|---|
+| 1 Top-3 | Vault `99 System/Now.md` (`## #1..#3`) + ältestes offenes P1-money aus dem Lagebild |
+| 2 Inbox | `gmail_search` über `google-mcp`, headless via `.empire/tools/mcp-call.mjs` |
+| 3 Lage | `.empire/tools/lagebild.sh --format json` (buzz#7 — nicht nachgebaut, benutzt) |
+| 4 Entscheidungen | `blocked-munir` je Repo einzeln über `gh` |
+| 5 Lücken | jede Quelle, die nicht geliefert hat — namentlich |
+
+`mcp-call.mjs` ist der fehlende Adapter: ein Shell-Script kann kein MCP sprechen. Server-Definitionen kommen aus `~/.buzz/.mcp.json`, damit es genau eine Quelle für Kommandos/Pfade gibt (Entscheid buzz#4). `buzzx.sh`/`buzzx.ps1` sind das Gegenstück für den Relay: der Desktop hat seine Nostr-Schlüssel 2026 in den **Windows Credential Manager** migriert (`identity.migrated`), ohne diesen Umweg ist der Relay für headless-Agenten tot.
+
+### Keine stillen Nullen — die Rot-Proben
+
+| Probe | Ergebnis |
+|---|---|
+| `Now.md` unlesbar | Block 1 = „⚠️ LÜCKE — keine Foki gelesen", nicht leer |
+| MCP-Config kaputt | Block 2 = „⚠️ LÜCKE — Inbox nicht erhoben", nicht „0 neue" |
+| Ein Repo unlesbar | namentlich in den Lücken, „fehlen in der Summe, zählen NICHT als 0" |
+| **Kein Repo lesbar** | „❌ KEINE DATENBASIS … Das ist KEIN ‚heute nichts zu tun'" — **das war zuerst ein echter Bug**: die leere Aggregat-Datei ließ den Batch „Heute kein Munir-Gate" melden, die gefährlichste denkbare Falschaussage dieses Rituals. Behoben, indem bei fehlender Datenbasis gar keine Liste entsteht |
+| 0 Blocker, aber Repos unlesbar | eigener Zweig: „0 in den LESBAREN Repos", nicht „kein Gate heute" |
+| Gmail-Limit erreicht | `≥50 … (Abfrage-Limit erreicht — Untergrenze)` statt einer Zahl, die wie ein Gesamtstand aussieht |
+| Telegram-Token weg | „NICHT gespiegelt", Exit 3 — und die Vault-Zeile behauptet nur noch die Kanäle, die wirklich zugestellt haben |
+
+Exit-Codes beantworten nur die Erhebung: `0` vollständig · `1` mit benannten Lücken · `2` kein Brief erzeugbar · `3` Brief steht, Transport tot. **Exit 0 heißt nicht „alles gut".**
+
+### Gemessene Falle: die Repo-Liste war still unvollständig
+
+`priorities.json` ist eine gepflegte Liste und hinkt neuen Repos hinterher: 82 blocked-munir aus der Liste gegen 83 laut owner-weiter Suche — `munirad7s/agency-handoff` fehlte. Das Script bildet deshalb die **Vereinigung** aus Liste und Suchtreffern und fragt danach je Repo exakt ab (Suche allein truncatet still). Dass das Lagebild aus buzz#7 dieselbe Liste benutzt, macht seine Backlog-Zahlen um dasselbe Repo zu klein → Folge-Ticket buzz#56.
+
+### Werkzeug-Fallen, die hier abgeräumt sind
+
+- **PowerShell 5.1 zerlegt native Argumente**: ein mehrzeiliger YAML-Body als `& exe @args` kommt als Dutzend Einzelargumente an („unexpected argument '13'"). `buzzx.ps1` quotet die Kommandozeile selbst nach den MSVCRT-Regeln und startet den Prozess direkt.
+- **MSYS zerlegt UTF-8 in argv** (dieselbe Familie wie die curl-Falle aus buzz#9): jedes Argument geht base64-kodiert durch die Arg-Datei.
+- **Die Konsolen-Codepage frisst Umlaute**: stdout wird als rohe UTF-8-Bytes geschrieben, sonst wird JSON mit Umlauten unparsbar.
+- **Agent-Keys brauchen die NIP-OA-Attestierung**: ohne `BUZZ_AUTH_TAG` antwortet der Relay `403 relay_membership_required`. Die Attestierung steht im Desktop-Agent-Record, nicht im Credential-Store.
+- **Telegrams Legacy-Markdown scheitert** an `_` in Repo-Namen und an `**` (dort ist fett `*x*`): der Spiegel geht als reiner Text raus, die formatierte Fassung steht im Buzz-Kanal.
+
+### Beweisstand (2026-08-01, alles live)
+
+| Schritt | Beweis |
+|---|---|
+| Ist-Stand erhoben | beide Workflows exportiert; Inhalt war reine Prosa ohne jede Datenquelle |
+| Gate-Batch manuell | 83 offene `blocked-munir`, P1-money zuerst — Zählung **identisch** mit unabhängiger `gh search`-Abfrage |
+| Morgenbrief manuell | alle 5 Blöcke präsent; Stichproben gegengeprüft (n8n-Fehler, Kuma-Monitor, Mollie-Abos direkt aus dem Lagebild-JSON) |
+| Werte bewegen sich | zwischen zwei Läufen 15:42 → 15:46: `blocked-munir` 83 → 84, `in-progress` 10 → 8 — gemessen, nicht gecacht |
+| Kanal | Gate-Batch in `#gates`, Morgenbrief in `#general` (Event-IDs im Issue-Kommentar) |
+| Telegram-Spiegel | beide Rituale zugestellt (`message_id` im Issue-Kommentar) |
+| Vault-Tagesnotiz | je Ritual eine Zeile über `~/.buzz/vault-log.sh` (buzz#11) |
+| Scheduler | Windows-Aufgaben `Buzz-Ritual-Morgenbrief` / `Buzz-Ritual-Gate-Batch`, Timing durch vorgezogenen Trigger live bewiesen |
+
+**Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector). Er steht als benannte Lücke im Brief — nicht weggelassen. Folge-Ticket buzz#57.
