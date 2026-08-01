@@ -1292,15 +1292,44 @@ Die Gmail-Triage des Führungs-Postfachs (buzz#4/#32) hängt an genau einem Refr
 2. **`users.getProfile` + Abgleich gegen das erwartete Postfach.** Ein Token für ein anderes Konto ist kein Fehler, den man sieht — die Triage liest dann still das falsche Postfach.
 3. **Die tatsächlich gewährten Scopes** aus der Token-Antwort gegen die, die die Triage braucht (`gmail.readonly`, `.modify`, `.compose`). Ein still geschrumpfter Scope legt sie genauso lahm wie ein toter Token, nur leiser. Direkte Anwendung der buzz#32-Lektion: **ein Scope ist keine Zusicherung, solange man ihn nicht misst.**
 
-### Warum kein `status=down`-Push
+### Zwei Alarmwege statt einem (buzz#86 — Fehlalarm von Token-Tod getrennt)
 
-Ein down-Push setzt voraus, dass das Script noch läuft. Genau die schlimmsten Fälle — Script kaputt, Node weg, Rechner aus — würden dann still durchgehen. **Das Ausbleiben des Heartbeats ist der Alarm** (Toleranz 26 h, Muster `backup-sh`/`funnel-e2e`; Benachrichtigungen 2+3 = Telegram + Mail, wie bei allen neun bestehenden Push-Monitoren).
+Die ursprüngliche Regel „ein Fehlschlag pusht NICHTS" war richtig, aber unvollständig. Sie machte zwei sehr verschiedene Lagen ununterscheidbar: **„der Token ist tot"** und **„der Rechner war aus"** sahen beide gleich aus — kein Heartbeat — und hätten dieselbe Meldung ausgelöst. Wer die zweite Lage ein paarmal grundlos gemeldet bekommt, schaltet den Wächter stumm; dann schweigt er auch bei der ersten.
 
-Konsequenz, die nicht wegdiskutiert wird: die Aufgabe läuft „Nur interaktiv". **Ein ausgeschalteter oder abgemeldeter Rechner erzeugt nach 26 h denselben Alarm wie ein toter Token.** Das ist bewusst die sichere Richtung (lieber ein Fehlalarm als ein stilles Loch), aber es ist ein Fehlalarm-Risiko — und ein Wächter, dem niemand mehr glaubt, ist schlechter als keiner. Folge-Ticket buzz#86.
+Seit buzz#86 gibt es **zwei** Wege, und der alte bleibt unangetastet:
+
+| Lage | Weg | Wie schnell | Was Munir sieht |
+|---|---|---|---|
+| Probe lief und hat den Token als **tot gemessen** | `status=down`-Push **mit Ursache** | Minuten | `Gmail-Token TOT (invalid_grant) — cd …\google-mcp && npm run auth` |
+| Probe lief **gar nicht** (Rechner aus, Node weg, Script kaputt) | kein Push, Kuma alarmiert nach Toleranz | 26 h | Kuma-Standardmeldung **ohne** Ursachentext |
+
+**Die Unterscheidungsregel ist damit ablesbar, ohne irgendetwas zu prüfen:** Alarm **mit** Ursachentext = handeln (`npm run auth`). Alarm **ohne** Ursachentext = der Rechner war zu lange aus; er **erledigt sich selbst**, sobald der Rechner wieder da ist — dann kommt der Heartbeat und Kuma schickt die Recovery-Mail hinterher.
+
+Damit das wirklich so ist, trägt die Aufgabe seit buzz#86 zwei zusätzliche Eigenschaften (`scripts/token-probe-task-triggers.ps1`, idempotent):
+
+- **`StartWhenAvailable`** — holt den verpassten 07:10-Lauf nach, sobald der Rechner wieder verfügbar ist. Vorher fiel er **ersatzlos** aus (gemessen: die Aufgabe trug nur einen `CalendarTrigger`).
+- **`LogonTrigger` mit 2 Minuten Verzögerung** — deckt lange Aus-Phasen sofort bei der Anmeldung ab.
+
+Der down-Push **ersetzt** die Fail-loud-Eigenschaft also nicht, er ergänzt sie: er beschleunigt genau den Fall, der Geld kostet (Triage des Führungs-Postfachs blind), und lässt den Rest unverändert scharf. Fälle, in denen der Push selbst unmöglich ist (`kuma-token-missing`, `kuma-unreachable`, `kuma-push-failed`), fallen bewusst auf den alten Weg zurück.
+
+### Der Wächter war weicher als dokumentiert (gemessen 2026-08-01)
+
+Monitor 54 stand auf `maxretries=1` bei `retryInterval == interval`. Gemessen (adas-empire#79): ein `status=down` erzeugt bei dieser Einstellung einen Heartbeat mit `status=2` (PENDING) und `important=0` — **es geht keine Benachrichtigung raus**. Erst der nächste fällige Beat nach `retryInterval` macht daraus DOWN. Die dokumentierte 26-h-Toleranz war real **~52 h**, und der neue sofortige down-Push wäre komplett verschluckt worden. Seit buzz#86: `maxretries=0`, und `kuma-add-gmail-token.mjs` zieht Konfigurationsdrift idempotent nach statt nur den Push-Token. Die übrigen sieben Altmonitore tragen denselben Fehler → **agency-infra#135**.
+
+**Die Toleranz gehört ins `interval`, nicht in einen unsichtbaren Retry.**
 
 ### Gemessene Falle: `process.exit()` im offenen fetch-Kontext liefert 127 statt 1
 
-Auf Windows zerreisst ein `process.exit()` aus dem Inneren eines noch offenen `fetch`-Kontexts libuv: `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, Exit **127**. Beim `invalid_grant`-Pfad ist das zugeschnappt — die Meldung war korrekt, der Exit-Code falsch, und bei einem Wächter **ist der Exit-Code der Vertrag**. Behoben: Fehlschläge werden geworfen, der Prozess endet einmal am Ende nach dem Abklingen der Sockets. Regel für jedes Script hier: nie `process.exit()` mitten in einem laufenden HTTP-Aufruf.
+Auf Windows zerreisst ein `process.exit()` aus dem Inneren eines noch offenen `fetch`-Kontexts libuv: `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, Exit **127**. Beim `invalid_grant`-Pfad ist das zugeschnappt — die Meldung war korrekt, der Exit-Code falsch, und bei einem Wächter **ist der Exit-Code der Vertrag**. Regel für jedes Script hier: nie `process.exit()` mitten in einem laufenden HTTP-Aufruf.
+
+**Die erste Reparatur war eine geratene Frist — und die trug nicht.** 60 ms Warten reichten nur, solange der letzte `fetch` der Heartbeat im Erfolgsfall war. Mit dem down-Push aus buzz#86 endet auch der **Fehlerpfad** auf einem frischen `fetch`, und der Fehlschlag lieferte prompt wieder 127 (gemessen; ein zweiter Versuch mit größerer Frist war 1 von 3 Läufen weiterhin rot — eine Frist zu raten ist keine Lösung, sie verschiebt nur die Wahrscheinlichkeit). Tragfähig ist, `process.exit()` im Normalfall **gar nicht** zu rufen:
+
+```js
+process.exitCode = code;
+setTimeout(() => process.exit(code), 2000).unref();
+```
+
+Node endet von selbst, sobald keine Handles mehr offen sind — dann kann die Assertion nicht auftreten. Der `unref()`-Timer hält die Event-Loop nicht am Leben und ist nur die Reissleine, falls Keep-alive-Sockets den Prozess länger offen halten. Gemessen: 9/9 Läufe (6 Fehlerpfad, 3 Erfolgspfad) mit dem erwarteten Code.
 
 Zweite, harmlosere Falle: die `.cmd`-Startrampe schreibt echtes UTF-8 ins Log; `Get-Content` dekodiert per Default ANSI und zeigt `gewÃ¤hrt`. Die Datei ist in Ordnung — der Leser braucht `-Encoding utf8` (oder Git Bash).
 
