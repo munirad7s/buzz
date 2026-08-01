@@ -287,3 +287,61 @@ Konsequenz: Der Kanal-Beweis („codex beantwortet eine echte Aufgabe in #build"
 | `buzz-agent` (nativ) | eigene Provider-Keys | API-Kosten — für den Abo-Weg irrelevant |
 
 Die geteilte Wochenquote ist der eigentliche Fund dieses Tickets: Ein Codex-Worker-Strang ist nur so belastbar wie das, was Munirs eigene Sessions übriglassen.
+
+## Geteiltes Gedächtnis: Vault vs. `buzz mem` (buzz#11 — Arbeitsteilung + Standardweg)
+
+**Entschieden: Der Vault ist Kanon, `buzz mem` ist Kladde — bei Widerspruch gewinnt der Vault.** Der Journal-Append läuft als **Shell-Append über `~/.buzz/vault-log.sh`**; obsidian-MCP bleibt bewiesener, aber bewusst nicht verdrahteter Fallback.
+
+| | `buzz mem` (Engram, NIP-AE, liegt auf dem Relay) | Ai_Brain-Vault (lokal, Sync via obsidian-git) |
+|---|---|---|
+| Inhalt | Betriebs-Kurzzeitwissen genau EINES Agenten: Tool-Fallen, CLI-Macken, Sitzungs-Zwischenstände | Alles Durable: Entscheidungen, Kundenstand, Projektfortschritt, Meilensteine, Session-Summaries |
+| Leser | nur dieser Agent | Munir **und alle** Agenten (Claude Code, Codex, Antigravity, Buzz) |
+| Lebensdauer | flüchtig, jederzeit überschreibbar | Kanon — wird zitiert, verlinkt, gegen ihn wird entschieden |
+| Tabu | Kundendaten, Preise, Zusagen, Secrets | Transkripte, Prompts, Rohausgaben, Secrets |
+
+`mem` ist **nicht geteilt** — im E2E gemessen: `claude` hat `mem/buzz-cli`, `Fizz` hat nur `core`. Wissen, das ein zweiter Agent braucht, gehört deshalb zwingend in den Vault, nicht in `mem`.
+
+### Pflicht + Format
+
+Am Ende jeder substantiellen Session (gebaut · entschieden · geliefert · gemessen · blockiert) 1–3 Bullets in die Tagesnotiz `01 Journal/YYYY-MM/YYYY-MM-DD.md`:
+
+```bash
+bash ~/.buzz/vault-log.sh <Agent> "<was> — <Ergebnis/Blocker>"
+# → - 🐝 <Agent>: <was> — <Ergebnis/Blocker>
+```
+
+Entscheidungen mit Tragweite bekommen zusätzlich den Marker `⚖️ Decision-Kandidat:`. Die `08 Decisions/`-Note schreibt der Agent NICHT selbst — dazu gehört Munirs „Warum", das nur er liefern kann; der Marker ist die Übergabe an den Dispatcher (#3) bzw. die nächste Claude-Code-Session. Volltext der Doktrin: `~/.buzz/AGENTS.md`, Abschnitt „Geteiltes Gedächtnis" (alle Personas lesen diese Datei). Der Append ist kein Outbound und damit gate-frei; alles, was das Haus verlässt, bleibt unter `.empire/POLICY.md` (#9).
+
+### Warum Shell-Append und nicht obsidian-MCP
+
+Beide Wege sind bewiesen. Standard ist der Shell-Append, weil:
+
+- **Headless-Kriterium** — dasselbe, das bei #4 die Gmail-Variante entschieden hat: obsidian-MCP setzt ein laufendes Obsidian mit Local-REST-API-Plugin voraus. Buzz-Agenten laufen als eigene Prozesse weiter, auch wenn Obsidian zu ist (am 2026-08-01 sogar, während die Buzz-**UI** von einem app-modalen Windows-Dialog blockiert war) — dann fiele die Journal-Pflicht **still** aus. Stille Nullen sind der schlimmste Fehlermodus für ein geteiltes Gedächtnis.
+- **Kein vierter MCP-Server** im Nest, keine zusätzliche Auth, kein zusätzlicher Unterhalt.
+- **Das Script IST der Guardrail** (gleiches Muster wie das fehlende Send-Tool bei Gmail und das fehlende Update-Tool bei Espo): es kann ausschließlich ans Ende der heutigen Tagesnotiz anhängen — kein `git`, kein Überschreiben, kein Pfad außerhalb `01 Journal/`.
+- **Append ans Dateiende ist die einzige kollisionsfreie Operation**, wenn parallele Sessions dieselbe Tagesnotiz schreiben — am 2026-08-01 live: fünf Agenten, eine Datei, null Verluste.
+
+obsidian-MCP bleibt der dokumentierte Fallback: nur `append_to_vault_file`, nie `patch_content`.
+
+### Fallen (gemessen, nicht geraten)
+
+- **PowerShells `Set-Content`/`Out-File`** schreiben Default-ANSI → jedes „ä" zerbricht. Deshalb schreibt ausschließlich das Bash-Script.
+- **`obsidian_patch_content`** verrechnet Offsets bei Umlauten/em-dash und schreibt mitten ins Wort — nur `append` ist sicher.
+- **obsidian-git committet blind**, auch unaufgelöste Konfliktmarker → Agenten fassen im Vault niemals `git` an.
+- **Datei ohne abschließendes Zeilenende**: naives `>>` klebt den Bullet an die letzte Zeile. Das Script prüft das letzte Byte und ergänzt vorher ein `\n`.
+- **Im Nest gilt `AGENTS.md`, nicht `CLAUDE.md`** — Buzz legt kein CLAUDE.md an; claude-acp und der builtin-Persona-Runtime fanden den neuen Abschnitt ohne Zutun und konnten ihn wörtlich zitieren.
+- **Kanal ≠ Agent:** ein gestarteter Agent abonniert nur die Channels, in denen er Mitglied ist (Fizz war nicht in `agent-lab`, sondern in `general`). Wer einen Agenten adressieren will, prüft erst `subscribed to channel` in seinem Log.
+
+### Beweisstand (E2E 2026-08-01, zwei verschiedene Agenten, echte Kanal-Sessions)
+
+| Schritt | Beweis |
+|---|---|
+| Doktrin kommt an (Agent 1) | `claude` in `#agent-lab` zitiert unaufgefordert „bei Widerspruch gewinnt IMMER der Vault" + das Standardkommando wörtlich |
+| Append Agent 1 | `- 🐝 claude: Vault-Protokoll-E2E (buzz#11) …` in `01 Journal/2026-08/2026-08-01.md`, Z. 74 |
+| Doktrin kommt an (Agent 2) | `Fizz` in `#general` nennt beide Verbote (kein `git`, nur anhängen) + Kommando wörtlich |
+| Append Agent 2 | `- 🐝 Fizz: … Umlaut-Probe: äußerst gründlich geprüft, Große & Kleine.`, Z. 81 |
+| Kein Overwrite | Zwischen beiden Sessions landeten drei fremde Appends (`gate`, 2× `buzz_empire`); Z. 74 unverändert, Fizz hat es selbst per `tail -8` gegengeprüft |
+| UTF-8 | Byte-Dump der Fizz-Zeile: `303 244`=ä, `303 237`=ß, `303 274`=ü, `342 200 224`=em-dash, `360 237 220 235`=🐝 — Fizz hat die ASCII-Transkription des Auftrags bewusst zu echten Umlauten korrigiert |
+| Kein Agenten-git | `git log ef7f07d..HEAD` im Vault: ausschließlich obsidian-git-Commits (`DESKTOP-LP3M6R0 <ts>`, 20-Minuten-Takt), kein Agenten-Commit, kein Push |
+| `mem` ist privat | `buzz mem ls`: `claude` → `mem/buzz-cli`, `Fizz` → nur `core` |
+| Fallback bewiesen | derselbe Append über `obsidian-mcp-tools/append_to_vault_file` (Local REST API v4.1.0, authenticated) |
