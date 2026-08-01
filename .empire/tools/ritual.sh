@@ -810,6 +810,33 @@ else
   [ "$VAULT" = "1" ] && append_vault "$BRIEF" "$LABEL"
 fi
 
-[ "$TRANSPORT_FAIL" = "1" ] && exit 3
-[ -s "$GAPFILE" ] && exit 1
+# --------------------------------------------------------- Lauf-Quittung (#15)
+# Eine Zeile je Lauf, append-only, ausserhalb des oeffentlichen Repos. Sie ist
+# der EINZIGE Beleg dafuer, DASS ein Ritual lief — Kanal-Posts beweisen nur die
+# erfolgreichen Transporte, ein Lauf ohne Transport hinterlaesst dort nichts.
+# Verbraucher: Cockpit-Kachel "Rituale" (#15). Kein Inhalt, nur Metadaten:
+# der Brief selbst kann Kundendaten tragen, diese Zeile nie.
+ritual_receipt() {
+  local rc="$1" file="${RITUAL_RUNS_FILE:-$HOME/.buzz/ritual-runs.jsonl}"
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+  # Naives >> klebt an eine Datei ohne abschliessendes Newline (gemessen bei
+  # vault-log.sh) — deshalb erst pruefen, dann anhaengen.
+  if [ -s "$file" ] && [ "$(tail -c 1 "$file" 2>/dev/null | od -An -c | tr -d ' ')" != '\n' ]; then
+    printf '\n' >> "$file" 2>/dev/null || return 0
+  fi
+  jq -cn --arg ritual "$MODE" --arg label "${LABEL:-}" \
+        --arg at "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --argjson exit_code "$rc" --argjson gaps "$(gapcount)" \
+        --argjson dry_run "$DRY" \
+        --arg transports "$( { [ "$POST" = "1" ] && [ "${BUZZ_OK:-0}" = "1" ] && printf 'buzz '; \
+                               [ "$TG" = "1" ]   && [ "${TG_OK:-0}" = "1" ]   && printf 'telegram '; \
+                               [ "$VAULT" = "1" ] && printf 'vault'; } | tr -s ' ' | sed 's/ $//' )" \
+    '{ritual:$ritual, label:$label, at:$at, exit_code:$exit_code, gaps:$gaps,
+      dry_run:($dry_run==1), transports:($transports|split(" ")|map(select(length>0)))}' \
+    >> "$file" 2>/dev/null || true
+}
+
+if [ "$TRANSPORT_FAIL" = "1" ]; then ritual_receipt 3; exit 3; fi
+if [ -s "$GAPFILE" ]; then ritual_receipt 1; exit 1; fi
+ritual_receipt 0
 exit 0

@@ -1401,3 +1401,53 @@ Reihenfolge im Ablauf ist bindend: **erst die Vorwoche lesen, dann diese Woche s
 | Echter Lauf, drei Transporte | Kanal `#general` (Event `cf7285c0112e5e4c`), Telegram `message_id 114`, Tagesnotiz-Zeile |
 
 **Befund fürs Lagebild, nicht fürs Ritual:** owner-weit existiert genau **ein** offenes `ready`-P1-money. Ein Vorschlagsblock, der deshalb einzeilig bleibt, sieht aus wie ein Fehler — er wird sichtbar mit den ältesten `ready`-P1 aufgefüllt und die Herkunft je Zeile benannt (`[💶P1-money]` / `[P1]`). Aufgefüllt wird nur, nie ersetzt.
+
+## Empire-Cockpit im Desktop (buzz#15 — eigener `/empire`-Tab)
+
+**Entschieden: eigener Tab statt Pulse-Erweiterung.** Kriterium aus dem Ticket war die Größe des Upstream-Diffs. Pulse zu erweitern hätte `PulseScreen`/`PulseView`/`PulseTabBar` angefasst — alles Upstream-Dateien, die sich schnell bewegen (im selben Sync-Fenster kamen 7 Upstream-Commits, davon 5 in `desktop/src/features/messages`). Der eigene Tab ist additiv: **ein** neuer Feature-Ordner, **eine** neue Route, und an Upstream-Dateien nur vier Einzeiler (`routes.ts`, `preview-features.json`, Sidebar-Eintrag, zwei Handler-Zeilen in `lib.rs`). Pulse bleibt unberührt und funktionsfähig.
+
+### Die Kacheln und ihre echten Quellen
+
+| Kachel | Quelle | Weg |
+|---|---|---|
+| Gates | offene `blocked-munir`-Issues über alle Repos | `lagebild.sh` (#7) → Snapshot → Tauri-Command |
+| Backlog | `ready` je Priorität + `in-progress` + Repo-Abdeckung | dito |
+| Agenten | `list_managed_agent_runtimes` | direkt aus der Desktop-Laufzeit, kein Snapshot |
+| Rituale | Lauf-Quittungen von `ritual.sh` | `~/.buzz/ritual-runs.jsonl` → Snapshot |
+
+**Kein Doppelbau:** Der Sammler `.empire/tools/cockpit-snapshot.sh` erhebt nichts selbst — er ruft `lagebild.sh --format json --blocks backlog` und liest die Quittungsdatei. Die Gate-Liste (`top_blocked`, Top-3 nach Prio dann Alter) kommt aus den Issues, die der Backlog-Block **ohnehin schon geholt hat**: additive jq-Zeilen in `lagebild.sh`, null zusätzliche API-Aufrufe, dieselbe Sortierung wie `ritual.sh gate-batch`.
+
+**Bewusst nur der backlog-Block.** n8n, Server und Mollie bleiben draußen: ein geöffneter Tab darf kein geteiltes Live-System anfassen. Der Sammler spricht ausschließlich mit GitHub.
+
+### Warum ein Snapshot und nicht Live-Abfragen
+
+Die Webview kann kein `gh`, kein `ssh`, kein `jq`. Ein Live-Cockpit hieße: jede Tab-Öffnung feuert ~28 GitHub-Abfragen. Deshalb: Sammler schreibt **eine** Datei in den Nest, der Tauri-Command `read_empire_snapshot` liest nur diese Datei (Öffnen kostet nichts), `refresh_empire_snapshot` startet den Sammler auf ausdrücklichen Klick. Der Script-Pfad ist fest verdrahtet (`<nest>/cockpit-snapshot.sh`, gespiegelt wie `vault-log.sh`) und nimmt **kein** Argument aus der UI entgegen — der Knopf kann keine Shell werden.
+
+### Keine stillen Nullen — die Regel ist hier Code, nicht Vorsatz
+
+Drei Schichten, jede einzeln testbar:
+
+1. **Sammler:** jeder Block trägt `state` + `reason`; fehlt die Quittungsdatei, steht dort `state:"error"` mit „es ist UNBEKANNT, ob Rituale liefen" — nicht „0 Rituale". Geschrieben wird atomar (`tmp` + `mv`), ein Abbruch hinterlässt nie eine halbe Datei.
+2. **Tauri-Command:** fehlende Datei, leere Datei, kaputtes JSON, JSON-Array, zu große Datei → `snapshot: null` + `readError`. Es gibt keinen Pfad, der ein Default-Objekt zurückgibt.
+3. **Kachel-Modell (`cockpitModel.ts`):** `headline: string | null`. `null` heißt „nicht erhoben" und wird rot gerendert. Ein fehlendes Feld (`blocked`, `ready_total`, eine einzelne Priorität) wird zur Lücke, **nie** zu 0. Eine echte gemessene 0 darf 0 sagen — und sagt dazu „gemessen, nicht angenommen".
+
+Dazu die Alters-Regel: ein Snapshot älter als 12 h behält seine Zahl, wird aber als überholt markiert; **ein Snapshot ohne verwertbaren Zeitstempel gilt als alt**, nicht als frisch (Fehlrichtung immer Richtung Misstrauen).
+
+### Gemessene Fallen
+
+- **`lib.rs` stand exakt auf der 1000-Zeilen-Ratchet** (`desktop/scripts/check-file-sizes.mjs`: Dateien am Limit dürfen nicht wachsen). Zwei Handler-Zeilen kippen `pnpm check` — und zwar **jede** künftige Command-Registrierung, auch upstream. Hier gelöst durch das Zusammenziehen dreier zusammengehöriger Shutdown-Statements (2 Leerzeilen); die eigentliche Lösung ist ein Split von `lib.rs` → Gardener-Ticket.
+- **`routeTree.gen.ts` wird vom Vite-Plugin erzeugt, nicht von `tsc`.** `pnpm build` (= `tsc && vite build`) scheitert deshalb beim ersten Lauf mit einer neuen Route („'/empire' is not assignable to keyof FileRoutesByPath"): der Typcheck läuft, bevor der Generator lief. Reihenfolge: erst `pnpm exec vite build`, dann `pnpm typecheck`.
+- **Ein frischer Worktree hat keine Sidecars.** `cargo check` auf `desktop/src-tauri` stirbt in `build.rs` mit „resource path `binaries\buzz-acp-…exe` doesn't exist". Die `.exe`-Sidecars aus dem Haupt-Checkout **kopieren** (nicht junctionen — siehe die Junction-Lektion oben).
+- Der Sidebar-Eintrag navigiert selbst (`useNavigate`) statt über `onSelect…`-Props: der Prop-Weg hätte AppShell, AppSidebar, `useAppNavigation` **und** die geteilte `SidebarSelectedView`-Union angefasst — vier Upstream-Dateien für einen fork-eigenen Tab.
+
+### Beweisstand (2026-08-01)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Stichprobe Backlog | Script `ready`=44 / `blocked`=8 für `munirad7s/spontan` == unabhängige `gh issue list`-Abfrage, exakt |
+| Stichprobe Gates | `top_blocked[0]` = `agency-infra#7`, Labels `blocked-munir,P1-money`, `createdAt` identisch mit `gh issue view` |
+| Rot-Probe Sammler | ohne Quittungsdatei meldet der Ritual-Block „UNBEKANNT, ob Rituale liefen", Exit 1 — nicht „0" |
+| Rot-Probe UI | Dev-Instanz ohne `cockpit.json`: alle drei Snapshot-Kacheln „nicht erhoben" in Rot + Reparatur-Kommando; danach mit Snapshot echte Zahlen |
+| Rust-Unit | 8/8 (`empire_cockpit`) — fehlende/leere/kaputte/Array-JSON-Datei je eigener Test |
+| TS-Unit | 19/19 (`cockpitModel`) — inkl. „fehlendes Feld ist keine 0", „echte 0 darf 0 sagen", Schema-Mismatch, Staleness-Grenze |
+| Gates | `pnpm check` (desktop + web) ✅ · `pnpm typecheck` ✅ · `vite build` ✅ · `cargo fmt --all --check` ✅ · `cargo clippy` desktop-tauri ohne neue Warnung |
