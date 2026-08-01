@@ -87,7 +87,7 @@ Begründung:
 - (a) erfüllt beides: **das Tool-Set IST der Guardrail** (dasselbe Muster wie das fehlende Send-Tool bei Gmail). Es existiert kein Update-, Delete- oder Create-Record-Tool — nur Lesen und Anhängen.
 
 - Repo: `munirad7s/espo-mcp` (`C:/Users/rescue/mcp-servers/espo-mcp`), Stack wie google-mcp/telegram-mcp (tsx + MCP-SDK + zod).
-- Tools: `espo_search`, `espo_get`, `espo_timeline` (Touchpoints + Stream), `espo_log_touchpoint` (CTouchpoint an existierenden Lead), `espo_log_note` (Stream-Post), `espo_permissions` (eigene ACL).
+- Tools: `espo_search`, `espo_get`, `espo_timeline` (Touchpoints + Stream), `espo_log_touchpoint` (CTouchpoint an existierenden Lead), `espo_log_note` (Stream-Post), `espo_permissions` (eigene ACL), `espo_client_dossier` (beide Quellen + Lücken, buzz#27).
 - Secrets: `~/.secrets/espo-buzz.env` (`ESPO_BUZZ_API_BASE`, `ESPO_BUZZ_API_KEY`), env-Override möglich — nichts in `.mcp.json`/Repo.
 - Wiring: `~/.buzz/.mcp.json` + Zwei-Quellen-Doktrin in `~/.buzz/AGENTS.md`.
 
@@ -107,6 +107,8 @@ Rest-Zugriffe sind Espo-Systemscopes, die jeder User besitzt (Preferences, Notif
 ### Zwei-Quellen-Regel
 
 Espo = Pipeline-Wahrheit (Status, Score, `cNextAction`, Touchpoint-Historie). Vault `04 Areas/clients/<kunde>/` = Zusagen-Kanon (`angebot.md` Preis, `scope.md` Leistung, `kommunikation.md` Versprechen). Bei Kundenkontakt immer beides; Preisfragen nie aus Espo, Statusfragen nie aus dem Vault.
+
+**Seit buzz#27 ist die Regel mechanisch, nicht mehr doktrinär: bei Kundenfragen `espo_client_dossier` statt `espo_search`/`espo_get`** — ein Aufruf, beide Quellen, jede fehlende Quelle als benannte Lücke. Details unten im Abschnitt „Kunden-Dossier-Brücke".
 
 ### Espo-Fallen (gemessen 2026-08-01, nicht geraten)
 
@@ -1037,3 +1039,77 @@ Anzeigename = **Rolle** (`Scout`, `Sentry`); Profil-Bio + Team = **Betreiber + G
 - **Ohne aufgelösten Owner verwirft `buzz-acp` im Default-Modus alles.** `agent owner: <pubkey>` im Log ist die Zeile, an der man einen „toten" Agenten von einem stummen unterscheidet.
 - **Kanal-Mitgliederverwaltung ist kein offener Gap mehr.** Die `buzz-acp`-README nennt sie so; `buzz channels add-member/remove-member/members` gibt es aber im CLI und es funktioniert. Ticket-Aussagen gegen den aktuellen Stand verorten.
 - **Ein zu vorsichtiger Agent ist auch ein Fehlermodus.** `Sentry` verweigerte zunächst sogar das *Weiterleiten* eines fremden GATED-Auftrags als Kanal-Post. Fail-closed ist richtig, aber die Klasse „interner Kanal-Post = FREI" gehört ausdrücklich in den System-Prompt, sonst blockiert die Kette an der falschen Stelle.
+
+## Kunden-Dossier-Brücke (buzz#27 — `espo_client_dossier`)
+
+**Entschieden: ein Tool, das beide Kanons in einem Aufruf liefert — und eine kuratierte Zuordnungs-Map als einzige Quelle für „welcher CRM-Record gehört zu diesem Kunden".**
+
+Die Zwei-Quellen-Regel stand seit buzz#6 als Text in `~/.buzz/AGENTS.md`. Nichts erzwang sie: Espo kennt Status und Touchpoints, aber nicht den zugesagten Preis; das Dossier kennt den Preis, aber nicht die Pipeline. Wer nur eine Seite liest, gibt irgendwann eine Preisauskunft, die nie vereinbart war.
+
+| Baustein | Ort |
+|---|---|
+| Tool `espo_client_dossier` | `munirad7s/espo-mcp`, `src/index.ts` |
+| Vault-Leser (read-only) | `src/dossier.ts` |
+| Zuordnungs-Logik | `src/client-map.ts` |
+| Map-Generator | `tools/clients-map-init.mjs` (`--write`) |
+| Map selbst | `~/.buzz/clients-map.json` — **außerhalb des Repos**, sie enthält Kundennamen |
+
+### Der Befund, der das Design bestimmt hat
+
+Nicht per `textFilter` gestochert (der matcht nur Namensanfänge und übersieht still), sondern der **komplette Korpus** gezogen — 286 Records — und lokal token-gematcht:
+
+| Dossier-Kunden | CRM |
+|---|---|
+| 1 von 5 | echter Record (alle Namens-Tokens) |
+| 3 von 5 | **kein einziger Kandidat im ganzen Korpus** |
+| 1 von 5 | nur Branchenwort-Treffer auf fremde Kalt-Leads |
+
+Umgekehrt haben 281 von 282 Leads kein Dossier. Der Korpus ist eine Kalt-Akquise-Liste, das Dossier-Verzeichnis der Bestandskunden-Kanon — **die Quellen überlappen fast nicht.**
+
+Entscheidend ist die dritte Zeile: Fuzzy-Matching liefert für fehlende Kunden **nicht nichts, sondern überzeugende Falschtreffer** aus derselben Branche. Genau das ist der Schaden, den das Tool verhindern soll.
+
+### Die Regel, die daraus folgt
+
+**`crm` wird ausschließlich aus einer verifizierten Quelle gefüllt** — expliziter `id`-Parameter oder Map-Eintrag. Ein Freitext-Treffer wird niemals `crm`; er erscheint als `candidates` **innerhalb** der Lücke, ausdrücklich als ungeprüft markiert. Dasselbe Muster wie das fehlende Send-Tool bei Gmail und das fehlende Update-Tool bei Espo: **die Struktur ist der Guardrail, nicht die Ermahnung.**
+
+`crm: null` in der Map ist ein **gemessenes** Nicht-Vorhandensein mit `why` und Datum — kein fehlender Eintrag. Der Generator auto-mappt nur bei vollem Token-Match und überschreibt kuratierte Einträge nicht.
+
+Verworfen: **Espo-Custom-Feld** (braucht Schreibrechte, die der Agent bewusst nicht hat — der Schreibpfad gehört buzz#52), **Fuzzy-Matching als Quelle** (s. o.), **Vault-Frontmatter** (wäre ein Vault-Schreibpfad, Nicht-Ziel des Tickets).
+
+### Keine stillen Nullen — die Lücken-Codes
+
+`gaps` ist eine **Nicht-Auskunft, kein Nullwert**. Jeder Code trägt `detail` + `action`:
+
+| Code | Bedeutung — und was es NICHT heißt |
+|---|---|
+| `crm-record-absent` | für diesen Kunden existiert gemessen kein Record — nicht „keine Pipeline" |
+| `crm-record-unmapped` | CRM-Record ohne Dossier — Zusagen sind unbelegt, keine Preisauskunft |
+| `client-unmapped` | Name nicht belegt; `candidates` sind ungeprüft und nie zitierfähig |
+| `crm-record-unreadable` | Map-Eintrag verwaist/gesperrt — nicht „kein Kunde" |
+| `angebot-missing` / `angebot-no-price` | Preis ist **nicht belegt** — nicht „kein Preis vereinbart", nicht „kostenlos" |
+| `dossier-folder-missing` / `scope-missing` / `kommunikation-missing` | Zusagen unbelegt — nicht aus dem CRM ableiten |
+| `client-map-missing` | die Zuordnung selbst fehlt — kein Record ist belegbar |
+| `dossier-is-template` | Ordner noch aus `_template/`, Inhalte unbestätigt |
+
+### Fallen (gemessen, nicht geraten)
+
+- **Espos `textFilter` matcht Namens*anfänge*.** Eine serverseitige Suche übersieht Records still; wer eine Zuordnung darauf baut, misst zu wenig. Der Generator zieht deshalb den ganzen Korpus.
+- **`StdioClientTransport` vererbt die Umgebung nicht** (bekannt aus buzz#32) — ohne explizites `env` testen die Rot-Proben das falsche Ding.
+- **Ausgabe-Kappung mit ehrlichem Zähler:** `scope`/`angebot`/Kommunikations-Einträge werden gekappt, `chars` nennt aber die **volle** Länge und `truncated` sagt es — sonst liest ein Agent einen Auszug als Gesamtstand.
+- **Kundendaten:** die E2E-Fixtures werden zur Laufzeit aus der Map außerhalb des Repos gelesen. Im Repo steht kein einziger Kundenname.
+
+### Beweisstand (2026-08-01, live über den echten Agenten-Pfad)
+
+`ESPO_ADMIN_PW=… node test/e2e.mjs` → **21/21** (vorher 14/14, alle 14 unverändert grün).
+
+| Schritt | Beweis |
+|---|---|
+| Beide Quellen | gemappter Kunde: CRM-Record + `angebot` (Preis erkannt) + `scope` + 5 von 9 Kommunikations-Einträgen, `gaps` **leer** |
+| Nur CRM | frischer Test-Lead: CRM befüllt, `dossier: null`, `crm-record-unmapped` |
+| Nur Dossier | Dossier-Kunde ohne Record: Dossier befüllt, `crm: null`, `crm-record-absent` mit Begründung |
+| **Fuzzy-Falle** | Branchenwort als Kundenname → 3 Kandidaten gefunden, `crm` bleibt **null** |
+| **Detektor rot** | Map fehlt → `client-map-missing`; Vault fehlt → `dossier-folder-missing`; verwaister Map-Eintrag → `crm-record-unreadable` |
+| **Mutationstest** | Kandidat wird `crm` → nur `fuzzy-never-crm` FAIL · `crm-record-absent` unterdrückt → nur `absent-is-named` FAIL · nach Revert beide wieder PASS (die Verweigerung ist spezifisch, nicht pauschal) |
+| Live über den Nest | `.empire/tools/mcp-call.mjs --server espo-mcp --list` zeigt 7 Tools; alle drei Ticket-Fälle über `~/.buzz/.mcp.json` gegen den Live-Checkout gefahren |
+
+**Live-Hinweis:** Der Nest startet `C:/Users/rescue/mcp-servers/espo-mcp/src/index.ts` — der Arbeits-Checkout stand auf einem längst gemergten Feature-Branch. Nach dem Merge wurde er auf `master` gezogen, sonst wäre das Tool im Repo, aber nicht im Nest gewesen. **Ein gemergter PR ist noch kein laufendes System.**
