@@ -147,7 +147,7 @@ Der Ticket-Hinweis „Action existiert" stimmt, ist aber irreführend — die H�
 
 Konsequenz: **ein Workflow mit `request_approval` schlägt fehl, statt zu warten.** Fail-closed, aber als Gate wertlos: keine Anfrage erreicht Munir, nichts ist freigebbar. Upstream bestätigt das selbst — die Konformitätstests dazu stehen in einer `pending_lane` („blocked until the executor approval gate (WF-08) mints pending approvals", `crates/buzz-test-client/tests/conformance_multitenant.rs:1866-1945`).
 
-Übernahmepfad: sobald WF-08 landet (oder wir es upstream beisteuern), wird `gate.sh` zum Adapter — Anfrage/Verdikt bleiben gleich, nur der Transport wechselt auf kind 46010. Folge-Ticket buzz#31.
+Übernahmepfad: sobald WF-08 landet (oder wir es upstream beisteuern), wird `gate.sh` zum Adapter — Anfrage/Verdikt bleiben gleich, nur der Transport wechselt auf kind 46010. Folge-Ticket buzz#33.
 
 ### Wie das Gate funktioniert
 
