@@ -35,6 +35,11 @@
 #      Fehlt sie, ist der Block FEHLER — auch wenn schon Zeilen angekommen sind.
 #   5. n8n prunt Executions: 0 Fehler ist erst dann grün, wenn im selben Fenster
 #      überhaupt Executions gelaufen sind. Sonst WARN "Datenlage prüfen".
+#   6. priorities.json ist eine gepflegte Liste und veraltet still: drei Repos mit
+#      ready-/P1-money-/blocked-munir-Tickets standen in keiner Zeile, ihre
+#      Blocker fehlten in JEDER Zahl (buzz#61). -> Der Backlog-Block bildet die
+#      Vereinigung aus Liste und owner-weiter Label-Suche und meldet die
+#      Nachzügler als `repos_untracked` namentlich, statt sie still zu schlucken.
 # ----------------------------------------------------------------------------
 
 set -uo pipefail
@@ -106,13 +111,36 @@ block_backlog() {
     block_error backlog "gh nicht authentifiziert (gh auth status)"; return
   fi
 
-  local repos=""
+  local repos="" discovered="" untracked=""
   if [ -n "${LAGEBILD_REPOS:-}" ]; then
+    # Explizite Vorgabe bleibt explizit — sonst wäre die Rot-Probe
+    # "Repo unlesbar" nicht mehr durchführbar.
     repos="$(printf '%s' "$LAGEBILD_REPOS" | tr ',' '\n')"
   elif [ -f "$PRIORITIES" ]; then
     repos="$(jqr -r '.repo_order[].repo' "$PRIORITIES" 2>/dev/null)"
     # Der Fork selbst steht nicht in priorities.json, führt aber die Zentrale.
     printf '%s\n' "$repos" | grep -qx 'munirad7s/buzz' || repos="$repos"$'\n'"munirad7s/buzz"
+
+    # priorities.json ist eine gepflegte Liste und hinkt neuen Repos hinterher.
+    # Gemessen 2026-08-01 (buzz#61): drei Repos mit ready-/P1-money-/
+    # blocked-munir-Tickets standen in keiner Zeile — ihre Blocker tauchten in
+    # keiner Zahl auf. Deshalb: Vereinigung aus Liste und den Repos, in denen
+    # eine owner-weite Suche Empire-Labels sieht. Der Fund wird zusätzlich
+    # namentlich gemeldet, damit die Liste nachgepflegt wird statt still zu
+    # veralten.
+    local lbl found
+    for lbl in ready blocked-munir in-progress; do
+      found="$(gh search issues --owner munirad7s --state open --label "$lbl" \
+                 --json repository -L 500 2>/dev/null \
+               | jqr -r '.[].repository.nameWithOwner' 2>/dev/null)"
+      [ -n "$found" ] && discovered="$discovered$found"$'\n'
+    done
+    if [ -n "$discovered" ]; then
+      printf '%s' "$discovered" | tr -d "$CR" | awk 'NF' | sort -u > "$TMP/disc.txt"
+      printf '%s' "$repos"      | tr -d "$CR" | awk 'NF' | sort -u > "$TMP/known.txt"
+      untracked="$(comm -23 "$TMP/disc.txt" "$TMP/known.txt" | tr '\n' ' ' | sed 's/ *$//')"
+      repos="$(cat "$TMP/disc.txt" "$TMP/known.txt" | sort -u)"
+    fi
   else
     block_error backlog "keine Repo-Quelle: $PRIORITIES fehlt und LAGEBILD_REPOS ist leer"; return
   fi
@@ -154,6 +182,7 @@ block_backlog() {
 
   jq -s \
     --argjson unreadable "$unreadable" \
+    --argjson untracked "$(printf '%s' "$untracked" | tr ' ' '\n' | jq -R -s 'split("\n")|map(select(length>0))')" \
     --argjson expected "$idx" \
     --argjson limit "$REPO_LIMIT" '
     . as $repos
@@ -164,10 +193,13 @@ block_backlog() {
     | ($issues | map(select(.labels|index("ready")))) as $ready_all
     | ($ready_all | map(select((.labels|index("blocked-munir"))|not))) as $ready
     | {
-        state: (if ($truncated|length) > 0 or ($unreadable|length) > 0 then "warn" else "ok" end),
+        state: (if ($truncated|length) > 0 or ($unreadable|length) > 0 or ($untracked|length) > 0 then "warn" else "ok" end),
         repos_expected: $expected,
         repos_read: ($repos|length),
         repos_unreadable: $unreadable,
+        # Repos, die Empire-Tickets tragen, aber in keiner priorities.json-Zeile
+        # stehen. Sie sind mitgezaehlt - aber die Liste gehoert nachgepflegt.
+        repos_untracked: $untracked,
         repos_truncated: $truncated,
         ready_total: ($ready|length),
         by_prio: {
@@ -193,6 +225,7 @@ block_backlog() {
                     | sort_by(.createdAt) | .[0:3]
                     | map({repo, number, title})),
         reason: (if ($unreadable|length) > 0 then "nicht lesbar: " + ($unreadable|join(", "))
+                 elif ($untracked|length) > 0 then "nicht in priorities.json (mitgezaehlt, Liste nachpflegen): " + ($untracked|join(", "))
                  elif ($truncated|length) > 0 then "Limit erreicht (mögliche Truncation): " + ($truncated|join(", "))
                  else null end)
       }' "$TMP/repos"/*.json > "$TMP/backlog.json" 2>"$TMP/backlog.err" \
