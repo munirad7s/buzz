@@ -593,3 +593,40 @@ Exit-Codes beantworten nur die Erhebung: `0` vollständig · `1` mit benannten L
 | Scheduler | Windows-Aufgaben `Buzz-Ritual-Morgenbrief` / `Buzz-Ritual-Gate-Batch`, Timing durch vorgezogenen Trigger live bewiesen |
 
 **Grenze, die nicht umgangen wird:** Kalender ist headless nicht erreichbar (läuft über den claude.ai-Connector). Er steht als benannte Lücke im Brief — nicht weggelassen. Folge-Ticket buzz#57.
+
+## ⚖️-Marker werden Entscheidungs-Entwürfe (buzz#42 — `.empire/tools/decision-drafts.sh`)
+
+buzz#11 hat den Marker eingeführt, aber niemanden, der ihn abholt. Ein Marker, den keiner einsammelt, ist nur ein Bullet in einer Tagesnotiz — nach drei Monaten fragt der nächste Agent „warum eigentlich?" und baut die Entscheidung neu oder falsch.
+
+| Modus | Was passiert |
+|---|---|
+| `collect [--days N]` | Marker der letzten N Tage → je eine Note in `08 Decisions/` mit `status: draft` |
+| `ask` | **EINE** gebündelte Telegram-Nachricht mit allen offenen Warum-Fragen (kein Einzelspam) |
+| `ingest [--wait S]` | Munirs Antworten einpflegen → `status: active` |
+| `list` | Stand aller Entwürfe |
+
+### Die Entwurfsentscheidungen dahinter
+
+- **Die Notes sind der Verarbeitungsstand, nicht ein Statusfile.** Idempotenz läuft über `decision_id:` im Frontmatter (SHA-256 der Marker-Zeile). Ein separates Statusfile könnte von den Daten wegdriften; ein gelöschtes würde Dubletten erzeugen. So gilt: Note da = verarbeitet.
+- **Das Journal wird nie angefasst.** Append-only bleibt append-only (buzz#11) — der Sammler liest nur.
+- **Keine erfundenen Begründungen.** Fehlt Munirs Warum, bleibt `## Munirs Warum` leer und die Note `draft`. Auch „Konsequenzen" bleibt bewusst leer statt geraten: eine plausibel klingende Begründung im Kanon ist schlimmer als eine fehlende, weil sie nicht mehr als fehlend erkennbar ist.
+- **Verdikt-Disziplin wie beim Gate:** eingepflegt wird nur aus Munirs Privatchat, nur von ihm selbst, nur mit genannter `D-…`-ID. `ingest` pollt im **Peek-Modus** — der Offset aus `~/.telegram-mcp-state.json` wird gelesen, nie fortgeschrieben; telegram-mcp bleibt Besitzer des Lesezeigers.
+
+### Falle, die den Sammler sonst unbrauchbar macht (gemessen)
+
+Ein naives `grep "⚖️ Decision-Kandidat:"` fängt **jede Zeile, die den Marker bloss erwähnt**. Gemessen an der echten Tagesnotiz: die buzz#11-Zusammenfassung zitiert den Marker in Backticks — der erste Lauf erzeugte daraus prompt eine Geister-Entscheidung („Marker: die 08 Decisions/-Note schreibt kein Agent selbst"). Der Sammler verlangt deshalb das dokumentierte Format `- 🐝 <Agent>: ⚖️ …` am Zeilenanfang: kein Backtick im Präfix, Präfix ≤ 40 Zeichen, endet auf `: `.
+
+### Beweisstand (2026-08-01)
+
+`bash .empire/tools/test/decision-drafts-test.sh` → **10/10 PASS** (Telegram-Mock ersetzt nur den Transport; Sammler, Format-Filter, jq-Extraktion und Note-Umschreiben sind echt).
+
+| Probe | Ergebnis |
+|---|---|
+| Sammler nimmt nur das dokumentierte Format | 1 von 3 Kandidatenzeilen — die Backtick-Erwähnung fällt raus |
+| Idempotenz | zweiter Lauf: 0 angelegt, 1 bereits vorhanden |
+| **Detektor kann rot werden** | fremder Chat · fremder Absender · Antwort ohne ID → jeweils **nichts** eingepflegt, Note bleibt `draft` |
+| Positiv (gemockt) | Warum eingepflegt, `status: active`, Platzhalter weg, Umlaute intakt |
+| Bündelung | genau 1 Nachricht statt einer je Entscheidung |
+| **Live am echten Vault** | `collect --days 7` → 1 echter Marker → `08 Decisions/gmail-send-nicht-ergaenzt.md` (`D-844DC1DE`, `draft`); `ask` → Telegram msg **105** |
+
+**Offen:** Der letzte Schritt (`ingest` mit Munirs echter Antwort) steht aus — er hängt an ihm, nicht am Code. Sobald er antwortet: `bash .empire/tools/decision-drafts.sh ingest`.
