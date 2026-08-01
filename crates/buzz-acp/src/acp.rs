@@ -108,14 +108,124 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+/// Keys whose values are masked before a JSON-RPC `data` payload is folded
+/// into an error message. Adapters are free to put credentials in `data`;
+/// error messages end up in logs, so the values never travel.
+const REDACTED_ERROR_DATA_KEYS: &[&str] = &[
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "authorization",
+];
+
+/// Cap for the human-readable part of a `data` payload appended to an error.
+const MAX_ERROR_DATA_MESSAGE_CHARS: usize = 500;
+
+/// Cap for the machine-readable remainder (error codes, kinds, retry hints).
+/// Kept separate from the message cap so a chatty `data.message` can never
+/// truncate away the short field you actually grep for.
+const MAX_ERROR_DATA_REST_CHARS: usize = 200;
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    // Truncate on a char boundary — `data` is arbitrary provider text and
+    // routinely contains non-ASCII.
+    value.chars().take(max).collect::<String>() + "…"
+}
+
+/// Recursively replace the values of credential-shaped keys with `***`.
+fn redact_error_data(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, val)| {
+                    let redacted = if REDACTED_ERROR_DATA_KEYS
+                        .iter()
+                        .any(|sensitive| key.eq_ignore_ascii_case(sensitive))
+                    {
+                        serde_json::Value::String("***".to_string())
+                    } else {
+                        redact_error_data(val)
+                    };
+                    (key.clone(), redacted)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_error_data).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Render a JSON-RPC `data` payload as a short human-readable detail string.
+///
+/// Objects lead with their `message` field (the part a human reads) and carry
+/// the remaining fields as compact JSON in parentheses (the part a grep
+/// finds). Returns `None` when there is nothing worth appending.
+fn describe_error_data(data: &serde_json::Value) -> Option<String> {
+    if data.is_null() {
+        return None;
+    }
+    let redacted = redact_error_data(data);
+    let Some(map) = redacted.as_object() else {
+        let rendered = match &redacted {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let rendered = rendered.trim().to_string();
+        return (!rendered.is_empty())
+            .then(|| truncate_chars(&rendered, MAX_ERROR_DATA_MESSAGE_CHARS));
+    };
+
+    let head = map
+        .get("message")
+        .and_then(|m| m.as_str())
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| truncate_chars(m, MAX_ERROR_DATA_MESSAGE_CHARS));
+
+    let rest: serde_json::Map<String, serde_json::Value> = map
+        .iter()
+        .filter(|(key, _)| key.as_str() != "message" || head.is_none())
+        .map(|(key, val)| (key.clone(), val.clone()))
+        .collect();
+    let tail = (!rest.is_empty()).then(|| {
+        truncate_chars(
+            &serde_json::Value::Object(rest).to_string(),
+            MAX_ERROR_DATA_REST_CHARS,
+        )
+    });
+
+    match (head, tail) {
+        (Some(head), Some(tail)) => Some(format!("{head} ({tail})")),
+        (Some(head), None) => Some(head),
+        (None, Some(tail)) => Some(tail),
+        (None, None) => None,
+    }
+}
+
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
 /// detail (e.g. a `data` field) is not lost.
+///
+/// When `message` *is* present, a `data` payload is appended rather than
+/// dropped. Adapters routinely put the real cause there while `message`
+/// stays a useless `"Internal error"` — `codex-acp` reports an exhausted
+/// ChatGPT quota as `{"message":"Internal error","data":{"message":"You've
+/// hit your usage limit…","codexErrorInfo":"usageLimitExceeded"}}`. Without
+/// this the log said `-32603: Internal error` and nothing else.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
+        Some(m) => match error.get("data").and_then(describe_error_data) {
+            Some(detail) => format!("{m} — {detail}"),
+            None => m.to_string(),
+        },
         None => error.to_string(),
     };
     AcpError::AgentError { code, message }
@@ -4259,6 +4369,106 @@ mod tests {
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
+    }
+
+    fn agent_error_message(error: &serde_json::Value) -> String {
+        match super::agent_error_from_json(error) {
+            AcpError::AgentError { message, .. } => message,
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_keeps_data_when_message_present() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"message": "quota gone", "codexErrorInfo": "usageLimitExceeded"}
+        });
+        let message = agent_error_message(&error);
+        assert!(message.contains("Internal error"), "got: {message}");
+        assert!(message.contains("quota gone"), "got: {message}");
+        assert!(message.contains("usageLimitExceeded"), "got: {message}");
+    }
+
+    /// The real payload from `@agentclientprotocol/codex-acp` 1.1.7 when the
+    /// ChatGPT subscription quota is exhausted (measured in buzz#18). Before
+    /// the fix this reached the log as `-32603: Internal error` and cost a
+    /// whole diagnosis session.
+    #[test]
+    fn agent_error_from_json_surfaces_real_codex_usage_limit() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "message": "You've hit your usage limit. Upgrade to Pro or try again at Aug 8th, 2026 9:14 AM.",
+                "codexErrorInfo": "usageLimitExceeded"
+            }
+        });
+        let message = agent_error_message(&error);
+        assert!(message.contains("usageLimitExceeded"), "got: {message}");
+        assert!(message.contains("usage limit"), "got: {message}");
+    }
+
+    #[test]
+    fn agent_error_from_json_message_only_is_unchanged() {
+        // No `data` → byte-identical to the pre-fix behaviour.
+        let error = serde_json::json!({"code": -32001, "message": "auth denied"});
+        assert_eq!(agent_error_message(&error), "auth denied");
+
+        // A null `data` is not detail either.
+        let error = serde_json::json!({"code": -32001, "message": "auth denied", "data": null});
+        assert_eq!(agent_error_message(&error), "auth denied");
+    }
+
+    #[test]
+    fn agent_error_from_json_data_only_fallback_still_intact() {
+        let error = serde_json::json!({"code": -32000, "data": {"reason": "quota exceeded"}});
+        let message = agent_error_message(&error);
+        assert!(message.contains("quota exceeded"), "got: {message}");
+    }
+
+    #[test]
+    fn agent_error_from_json_redacts_credentials_in_data() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "message": "refresh failed",
+                "refresh_token": "rt-supersecret",
+                "nested": {"Authorization": "Bearer abc123"}
+            }
+        });
+        let message = agent_error_message(&error);
+        assert!(message.contains("refresh failed"), "got: {message}");
+        assert!(!message.contains("supersecret"), "leaked: {message}");
+        assert!(!message.contains("abc123"), "leaked: {message}");
+        assert!(message.contains("***"), "expected mask, got: {message}");
+    }
+
+    #[test]
+    fn agent_error_from_json_truncates_chatty_data() {
+        let long = "x".repeat(5_000);
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"message": long, "kind": "overflow"}
+        });
+        let message = agent_error_message(&error);
+        assert!(
+            message.chars().count() < 1_000,
+            "message not truncated: {} chars",
+            message.chars().count()
+        );
+        // The short machine-readable field survives the chatty one.
+        assert!(message.contains("overflow"), "got: {message}");
+    }
+
+    #[test]
+    fn agent_error_from_json_handles_non_object_data() {
+        let error = serde_json::json!({"code": -32603, "message": "Internal error", "data": "rate limited"});
+        let message = agent_error_message(&error);
+        assert!(message.contains("rate limited"), "got: {message}");
     }
 
     // ── build_codex_config_env ────────────────────────────────────────────────
