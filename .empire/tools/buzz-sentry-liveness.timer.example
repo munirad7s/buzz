@@ -1,0 +1,42 @@
+# Liveness-Probe fuer Sentry (buzz#77) — Vorlage fuer /etc/systemd/system/.
+#
+# Zwei Dateien, beide nach /etc/systemd/system/ kopieren, dann:
+#   systemctl daemon-reload
+#   systemctl enable --now buzz-sentry-liveness.timer
+#   systemctl list-timers buzz-sentry-liveness.timer
+#
+# Warum systemd-Timer und nicht Cron: derselbe Ort wie die Unit, die er ueberwacht,
+# gleiche Log-Senke, und `Persistent=true` holt einen wegen Neustart verpassten Lauf
+# nach — ohne das waere jeder Reboot ein Loch im Heartbeat und damit ein Fehlalarm.
+#
+# ---------- /etc/systemd/system/buzz-sentry-liveness.service ----------
+# [Unit]
+# Description=Liveness-Probe: antwortet der Buzz-Agent "Sentry" noch?
+# Documentation=https://github.com/munirad7s/buzz/issues/77
+# After=network-online.target buzz-sentry.service
+# Wants=network-online.target
+#
+# [Service]
+# Type=oneshot
+# ExecStart=/bin/bash /opt/buzz-agents/liveness-probe.sh
+# StandardOutput=append:/opt/buzz-agents/logs/liveness.log
+# StandardError=append:/opt/buzz-agents/logs/liveness.log
+# TimeoutStartSec=300
+#
+# ---------- /etc/systemd/system/buzz-sentry-liveness.timer ----------
+# [Unit]
+# Description=Sentry-Liveness alle 30 Minuten
+#
+# [Timer]
+# OnBootSec=5min
+# OnUnitActiveSec=30min
+# AccuracySec=1min
+# Persistent=true
+#
+# [Install]
+# WantedBy=timers.target
+#
+# OnBootSec=5min statt sofort: nach einem Reboot braucht der Relay-Stack einen Moment,
+# und eine Probe, die in die Startphase hineinlaeuft, meldet einen Ausfall, den es
+# nicht gibt. Das Log liegt unter /opt/buzz-agents/logs/*.log und faellt damit unter
+# die bestehende logrotate-Regel /etc/logrotate.d/buzz-agents.
