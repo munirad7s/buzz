@@ -31,7 +31,7 @@ niemals Geld oder Vertrauen.
 
 - Lesen: Mail, Telegram, CRM, Repos, Vault, Logs, Monitoring, Web.
 - Triagieren, labeln, zusammenfassen, priorisieren, recherchieren.
-- **Entwürfe**: Gmail-Draft (bleibt Draft), Textvorschläge, Angebotsskizzen.
+- **Entwürfe**: Gmail-Draft (bleibt Draft, bis das Gate ihn freigibt), Textvorschläge, Angebotsskizzen.
 - Interne Kanal-Posts in Buzz, Kommentare/Issues/PRs in **eigenen** Repos.
 - Vault: Journal, Projekt-, Ideen-, Entscheidungsnotizen.
 - CRM: `espo_log_touchpoint` / `espo_log_note` für **tatsächlich stattgefundenen** Kontakt.
@@ -56,6 +56,24 @@ Merksatz: **Verlässt es die Maschine, kostet es Geld, oder kann Munir es nicht 
 
 `main`-Merges im eigenen Repo sind FREI (Standing-Auftrag „push und merge").
 **Merging ≠ Deployen** — was danach live geht, ist GATED.
+
+#### Mail-Versand: der eine erlaubte Weg (buzz#32)
+
+Aus der Regel „Mail senden ist GATED" folgt kein Verbot mehr, sondern genau ein
+Pfad: **`gmail_send_draft`** im MCP-Server `google-mcp`. Das Tool nimmt nur eine
+`draftId` und ruft das Gate selbst auf — es gibt kein Flag, keinen Testmodus und
+keine „interne Adresse", die daran vorbeiführt. Frei komponierte Mails, Serien-
+und Massenmail existieren als Fähigkeit nicht (Bcc und > 3 Empfänger werden
+abgelehnt, bevor überhaupt gefragt wird).
+
+Zwei Dinge, die dabei nicht verhandelbar sind:
+
+- **Was freigegeben wurde, geht raus — sonst nichts.** Der Sender prüft vor dem
+  Versand den SHA-256 des Entwurfs gegen den, der in der Anfrage stand. Ein nach
+  der Freigabe geänderter Entwurf wird verweigert.
+- **Der Scope ist kein Schutz.** Gemessen 2026-08-01: `gmail.compose` darf
+  bereits senden, auch ohne `gmail.send`. Wer eine Fähigkeit einschränken will,
+  schränkt das Tool-Set ein, nicht die OAuth-Scope-Liste.
 
 ### VERBOTEN — nie, auch nicht mit Freigabe
 
