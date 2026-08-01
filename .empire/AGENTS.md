@@ -1495,3 +1495,53 @@ Um den Kompilier-Aufwand zu sparen, lief die Verifikation zuerst mit `CARGO_TARG
 | Wiederholbarkeit | drei aufeinanderfolgende Läufe grün (`1 flaky` = Retry gegriffen, kein Fehlschlag) |
 | `git status --short` nach dem Lauf | keine neuen untracked Dateien |
 | Rot-Probe | Fixture-Antwort verfälscht → **genau** der zugehörige Test rot, Rest grün |
+
+## Stille Fehler: die Muster, die am 2026-08-01 gefangen wurden
+
+Fünf Systeme waren an diesem Tag grün und taten nichts. Die folgenden Muster sind die dabei gemessenen Verallgemeinerungen — sie gelten für jedes neue Skript, jeden neuen Monitor, jede neue Zahl.
+
+### Ein Wrapper, der den Exit-Code verschluckt, macht jeden Detektor blind
+
+`ritual-task.cmd` meldete der Windows-Aufgabenplanung seit buzz#10 für **jeden** Ausgang Ergebnis `0`. Ursache war das abschließende Log-`echo` **innerhalb** der `bash -lc`-Zeichenkette: die letzte Anweisung bestimmt den Exit-Status der Shell.
+
+```bash
+bash -c "bash -c 'exit 3'; echo x"   # -> 0   (der echo gewinnt)
+bash -c "bash -c 'exit 3'"           # -> 3
+```
+
+Gemessen: `ritual.sh` gab `64` zurück (kein Brief erzeugt, nichts zugestellt), die `.cmd` gab `0` zurück. Alle drei Führungsrituale konnten also nie rot werden. Behoben in PR #98 — `rc` merken, loggen, weiterreichen; `0`/`1` bleiben grün („der Brief hat Munir erreicht"), ab `2` wird die Aufgabe rot.
+
+**Regel:** In jedem `.cmd`/`.ps1`/`.sh`-Wrapper den Exit-Code der Nutzlast **unmittelbar** sichern (`set "RC=%ERRORLEVEL%"` bzw. `rc=$?`) und am Ende weiterreichen. Kein Kommando zwischen Nutzlast und Sicherung — auch kein Log-`echo`. Vorbild im Haus: `google-mcp/scripts/token-probe-task.cmd`. Und danach die Rot-Probe: der Wrapper muss mit einem garantiert scheiternden Aufruf einen Nicht-Null-Code liefern, sonst ist der Fix unbewiesen.
+
+### Aus der n8n-Execution-Historie darf man „ist nie gelaufen" NICHT schließen
+
+`GET /executions?workflowId=…` meldete für drei aktive Wochen-Workflows null Executions. Alle drei waren gelaufen. Grund: n8n prunt nach **Anzahl** (Default `EXECUTIONS_DATA_PRUNE_MAX_COUNT=10000`, im Container ist keine `EXECUTIONS_*`-Variable gesetzt), und bei ~2 900 Executions/Tag reicht die Historie nur **3,4 Tage** zurück — kürzer als eine Wochen-Periode.
+
+```sql
+SELECT min("startedAt"), max("startedAt"), count(*) FROM execution_entity;
+-- 2026-07-29 06:34 | 2026-08-01 17:20 | 10175
+```
+
+Prune-feste Gegenquellen, die stattdessen zu benutzen sind:
+- **`workflow_statistics`** (Postgres, DB `n8n`): `count` + `latestEvent` je Workflow und Ereignistyp (`production_success`/`production_error`), überlebt jedes Pruning.
+- **Das fachliche Artefakt** des Workflows selbst — z. B. die Listmonk-Kampagne, die der Förder-Uhr-Digest jeden Montag anlegt (Kampagne id 9 belegte den Lauf am 2026-07-27 05:15).
+
+Ticket: adas-empire#85.
+
+### Ein Monitor ohne Benachrichtigung ist eine Kachel, kein Wächter
+
+Uptime-Kuma: `gobd-export` (id 55) ist aktiv und hat **null** zugeordnete Benachrichtigungen — als einziger von 51. Alle vier eingecheckten Provisionierungs-Skripte in `agency-infra` setzen `notificationIDList: {}`.
+
+```sql
+SELECT m.id, m.name,
+       (SELECT COUNT(*) FROM monitor_notification mn WHERE mn.monitor_id=m.id)
+FROM monitor m WHERE m.active=1 ORDER BY 3;
+```
+
+**Regel:** Nach jedem neuen Monitor diese Zählung laufen lassen; `0` ist ein Fehler. Und der Alarm gilt erst als bewiesen, wenn er einmal echt zugestellt wurde (Telegram-`message_id` **und** Gmail-Thread) — nicht, wenn er konfiguriert ist. Ticket: agency-infra#134.
+
+### Handwerk, das sonst falsche Funde erzeugt
+
+- **CRLF + Locale:** `gh`-Ausgaben tragen `\r`, und `comm` braucht `LC_ALL=C`. Ohne `tr -d '\r'` und `LC_ALL=C` meldete der Repo-Abgleich 22 statt 2 fehlende Repos — ein frei erfundener Fund.
+- **Der lokale Arbeitsbaum lügt:** `priorities.json` nannte lokal noch die Bounce-Adresse `munirdue@gmail.com`. Auf `origin/main` war sie längst korrigiert — der lokale Baum hing hinterher und trug zusätzlich fremde uncommittete Arbeit. **Vor jedem „das ist noch kaputt" gegen `origin/main` prüfen, nicht gegen den Baum.**
+- **Der Nenner darf nicht fehlen:** `lagebild.sh` bildet inzwischen die Vereinigung aus `priorities.json` und einer owner-weiten Label-Suche und meldet nicht gelistete Repos namentlich (buzz#61). Gegengeprüft: die Abdeckung stimmt. Ebenso vollständig ist die Kuma-Routenabdeckung — jeder Traefik-Host hat einen Monitor.
