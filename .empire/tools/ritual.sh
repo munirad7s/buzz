@@ -876,7 +876,27 @@ render_morgenbrief() {
                then " und bringt " + (($p.mrr_eur|tostring)|sub("[.]";",")) + " Euro im Monat" else "" end) + "."
           else "   Es läuft aktuell kein Abo." end ),
         ( if ($p.payments_window_complete // true) then empty
-          else "   Ich sehe nur die letzten 50 Zahlungen — ältere von gestern können fehlen." end )
+          else "   Ich sehe nur die letzten 50 Zahlungen — ältere von gestern können fehlen." end ),
+        # Zweiter Zahlungsweg (buzz#36). Getrennt genannt, nie dazugerechnet —
+        # und wenn er fehlt, steht das hier, statt dass „Kein Zahlungseingang"
+        # so klingt, als wäre es die ganze Wahrheit.
+        ( ($p.stripe.state // "fehlt") as $st |
+          if $st == "unconfigured"
+            then "   Stripe kann ich nicht sehen — dort könnte Geld eingegangen sein, das in dieser Zeile fehlt."
+          elif $st == "error"
+            then "   Stripe hat nicht geantwortet. Was dort ankam, weiß ich heute nicht."
+          elif $st == "fehlt"
+            then "   Stripe habe ich gar nicht erst abgefragt — die Zeilen oben sind nur Mollie."
+          elif ($p.stripe.last24_paid // 0) > 0
+            then "   Bei Stripe sind zusätzlich "
+                 + (if ($p.stripe.last24_paid) == 1 then "eine Zahlung" else (($p.stripe.last24_paid)|tostring) + " Zahlungen" end)
+                 + " eingegangen"
+                 + (if $redact == 0 and $p.stripe.last24_paid_eur != null
+                    then ", zusammen " + (($p.stripe.last24_paid_eur|tostring)|sub("[.]";",")) + " Euro" else "" end) + "."
+          else "   Bei Stripe kam ebenfalls nichts an"
+               + (if ($p.stripe.subscriptions_active // 0) > 0
+                  then " (" + (($p.stripe.subscriptions_active)|tostring) + " laufende Abos)" else "" end) + "."
+          end )
       ' "$TMP/lage.json" | tr -d "$CR"
       gaps_satz geld | sed 's/^/   /'
     fi

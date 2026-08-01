@@ -1813,3 +1813,22 @@ Zwei Wege konnten die Härtung aus buzz#52 (CRM-Key von 61 Scopes auf einen) in 
 - **Der Push-Hook blockt auch `master`, nicht nur `main`.** `git push origin master` wird pre-execution abgewiesen und nimmt die ganze `&&`-Kette mit (auch den Commit davor). Immer Feature-Branch → PR.
 - **Der Secret-Hook greift auch auf Fließtext.** Eine Lektion, die einen Variablennamen mit angehängtem Gleichheitszeichen enthielt, wurde als Secret-Write abgewiesen — Erklärtexte über Secrets ohne dieses Muster schreiben.
 - **Bestätigt: mehrzeiliges `node -e '…'` tut in Git Bash gar nichts** (Exit 0, keine Ausgabe). Die Rot-Probe lief erst, nachdem sie in einer `.mjs`-Datei stand.
+## Stripe im Lagebild — gebaut, aber ohne Key blind (buzz#36)
+
+Der `pay`-Block trägt jetzt ein eigenes Unterobjekt `.pay.stripe` (`stripe_json()` in `lagebild.sh`). **Getrennt von Mollie, nie summiert** — ein toter Anbieter darf nicht in einer Gesamtsumme verschwinden.
+
+Die frühere Notiz „Stripe fehlt bewusst — als Lücke benannt statt als 0 € gemeldet" ist damit überholt: die Lücke ist jetzt **maschinell** benannt statt nur dokumentiert. Ohne Key liefert der Block `state: "unconfigured"` und der Morgenbrief schreibt „Stripe kann ich nicht sehen — dort könnte Geld eingegangen sein, das in dieser Zeile fehlt." Vorher sagte die Geld-Zeile „Kein Zahlungseingang" und meinte damit **nur Mollie**, ohne das dazuzusagen.
+
+- Key-Quelle: `STRIPE_READ_KEY` (bevorzugt) oder `STRIPE_SECRET_KEY`, aus `~/.secrets/stripe-api.env` bzw. `~/.secrets/master.env`. Erwartet ist ein **Restricted Key (`rk_`)**; ein Vollzugriffs-Key (`sk_`) funktioniert, wird aber im Lagebild sichtbar als solcher gemeldet, damit er nicht dauerhaft liegen bleibt.
+- Nur lesende Endpunkte: `GET /v1/subscriptions?status=active`, `GET /v1/charges?limit=50`. Kein Refund, keine Mutation, kein Webhook. Der Stripe-MCP scheidet für Scripts aus (OAuth/interaktiv).
+- Felder analog Mollie inkl. `last24_*` und `payments_window_complete` — dieselbe Form, damit die Ausgabe nicht zwei Dialekte spricht.
+
+**Gemessener Stand (2026-08-01):** Es existiert **kein** headless-tauglicher Stripe-Key. `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET` stehen als **leere Platzhalter** in `master.env`; `~/.secrets/mondsamt-stripe.json` enthält nur ein Webhook-Signing-Secret (`whsec_`); owner-weit findet sich kein einziger `sk_`/`rk_`-Wert. Einen API-Key kann nur das Stripe-Dashboard erzeugen — Munir-Handgriff.
+
+| Probe | Ergebnis |
+|---|---|
+| kein Key | `Stripe: NICHT KONFIGURIERT — …NICHT gemessen und NICHT 0`, Mollie-Teil vollständig lesbar |
+| `STRIPE_READ_KEY=rk_live_offensichtlichfalsch` | `Stripe: FEHLER — Stripe /subscriptions HTTP 401 — Invalid API Key provided: rk_live_****lsch` — keine Zahlen. Stripe maskiert den Key in der eigenen Fehlermeldung, es leakt nichts. |
+| Morgenbrief ohne Key | „Stripe kann ich nicht sehen — dort könnte Geld eingegangen sein, das in dieser Zeile fehlt." |
+
+**Noch offen (braucht den Key):** Stichprobe gegen echte Stripe-Daten und die Schreibschutz-Probe (ein Schreibaufruf mit dem Key muss abgelehnt werden). **Derselbe Handgriff hängt an agency-infra#130** (`STRIPE_INVOICE_EXPORT_KEY`, Invoices:read) — ein Restricted Key mit den drei Lese-Rechten Invoices/Charges/Subscriptions bedient beide Tickets.

@@ -415,6 +415,87 @@ REMOTE
     || block_error server "Aggregation der Server-Antwort fehlgeschlagen"
 }
 
+# --------------------------------------------------------- (d2) Stripe-Radar
+# buzz#36. Zweiter Zahlungsweg. Wird NICHT mit Mollie summiert: ein toter
+# Anbieter darf nicht in einer Gesamtsumme verschwinden. Und: ein nicht
+# abgefragter Anbieter ist kein leerer Anbieter — ohne Key steht hier
+# `unconfigured`, niemals 0.
+#
+# Der Stripe-MCP scheidet für dieses Script aus (OAuth/interaktiv). Gebraucht
+# wird ein Restricted Key mit ausschliesslich `read` — Prefix `rk_`. Ein
+# Vollzugriffs-Key (`sk_`) wird zwar akzeptiert, aber sichtbar als solcher
+# gemeldet, damit niemand ihn versehentlich dauerhaft hier liegen lässt.
+stripe_json() {
+  load_secret_file "$SECRETS_DIR/stripe-api.env" STRIPE_READ_KEY STRIPE_SECRET_KEY 2>/dev/null
+  load_secret_file "$SECRETS_DIR/master.env" STRIPE_READ_KEY STRIPE_SECRET_KEY 2>/dev/null
+  local key="${STRIPE_READ_KEY:-${STRIPE_SECRET_KEY:-}}"
+  if [ -z "$key" ]; then
+    jq -n '{state:"unconfigured",
+            reason:"kein headless-tauglicher Stripe-Key (STRIPE_READ_KEY / STRIPE_SECRET_KEY) in ~/.secrets — Stripe-Umsatz ist hier NICHT gemessen und NICHT 0"}'
+    return
+  fi
+
+  local ua='buzz-lagebild/1.0' code
+  code="$(curl -s -m 30 -o "$TMP/st_subs.json" -w '%{http_code}' -A "$ua" \
+          -H "Authorization: Bearer $key" \
+          'https://api.stripe.com/v1/subscriptions?status=active&limit=100')"
+  if [ "$code" != "200" ]; then
+    jq -n --arg c "$code" --arg d "$(jq -r '.error.message // empty' "$TMP/st_subs.json" 2>/dev/null | head -c 120)" \
+      '{state:"error", reason:("Stripe /subscriptions HTTP " + $c + (if $d == "" then "" else " — " + $d end))}'
+    return
+  fi
+  # HTTP 200 beweist nichts: es muss auch eine Liste drin sein.
+  if ! jq -e '.data|type=="array"' "$TMP/st_subs.json" >/dev/null 2>&1; then
+    jq -n '{state:"error", reason:"Stripe /subscriptions: 200 ohne verwertbare .data-Liste"}'
+    return
+  fi
+
+  code="$(curl -s -m 30 -o "$TMP/st_ch.json" -w '%{http_code}' -A "$ua" \
+          -H "Authorization: Bearer $key" \
+          'https://api.stripe.com/v1/charges?limit=50')"
+  if [ "$code" != "200" ] || ! jq -e '.data|type=="array"' "$TMP/st_ch.json" >/dev/null 2>&1; then
+    jq -n --arg c "$code" '{state:"error", reason:("Stripe /charges HTTP " + $c + " ohne verwertbare Liste")}'
+    return
+  fi
+
+  local since30 since24
+  since30="$(date -u -d '-30 days' '+%s' 2>/dev/null || date -u -v-30d '+%s')"
+  since24="$(date -u -d '-24 hours' '+%s' 2>/dev/null || date -u -v-24H '+%s')"
+
+  jq -n \
+    --argjson amounts "$SHOW_AMOUNTS" \
+    --argjson since30 "$since30" --argjson since24 "$since24" \
+    --arg keykind "$(case "$key" in rk_*) echo restricted ;; sk_*) echo vollzugriff ;; *) echo unbekannt ;; esac)" \
+    --slurpfile subs "$TMP/st_subs.json" --slurpfile ch "$TMP/st_ch.json" '
+    ($subs[0].data) as $s | ($ch[0].data) as $c
+    | ($c | map(select(.created >= $since30))) as $c30
+    | ($c | map(select(.created >= $since24))) as $c24
+    | {
+        state: (if ($c30 | map(select(.status=="failed")) | length) > 0 then "warn" else "ok" end),
+        key_kind: $keykind,
+        subscriptions_active: ($s|length),
+        subscriptions_more_pages: ($subs[0].has_more // false),
+        last_payments: ($c[0:3] | map({status, method:(.payment_method_details.type // null),
+                                       at:(.created | todate | .[0:16])}
+                                      + (if $amounts == 1
+                                         then {amount:((.amount/100|tostring) + " " + (.currency|ascii_upcase))}
+                                         else {} end))),
+        last30_total: ($c30|length),
+        last30_by_status: ($c30 | group_by(.status) | map({key:.[0].status, value:length}) | from_entries),
+        last24_total: ($c24|length),
+        last24_paid: ($c24 | map(select(.status=="succeeded")) | length),
+        last24_paid_eur: (if $amounts == 1
+                          then ($c24 | map(select(.status=="succeeded") | .amount) | add // 0) / 100
+                          else null end),
+        # Wie bei Mollie: sagt, ob die 50 abgeholten Zahlungen 24 h ueberhaupt abdecken.
+        payments_window_complete: (($c|length) < 50 or (($c|last|.created) < $since24)),
+        reason: (if ($c30 | map(select(.status=="failed")) | length) > 0
+                 then (($c30 | map(select(.status=="failed")) | length | tostring)
+                       + " fehlgeschlagene Zahlung(en) in 30 Tagen")
+                 else null end)
+      }'
+}
+
 # --------------------------------------------------------------- (d) Zahlungen
 block_pay() {
   load_secret_file "$SECRETS_DIR/mollie-api.env" MOLLIE_LIVE_API_KEY
@@ -496,7 +577,19 @@ block_pay() {
                    then (($real_fail|length)|tostring) + " Zahlung(en) NACH der Methodenwahl fehlgeschlagen — echter Zahlungsfehler"
                  else null end)
       }' > "$TMP/pay.json" 2>/dev/null \
-    || block_error pay "Aggregation der Mollie-Antwort fehlgeschlagen"
+    || { block_error pay "Aggregation der Mollie-Antwort fehlgeschlagen"; return; }
+
+  # Stripe kommt als eigenes Unterobjekt dazu (buzz#36) — getrennt, nie summiert.
+  # Fällt Stripe aus, bleibt der Mollie-Teil vollständig lesbar; genau dafür ist
+  # die Trennung da.
+  stripe_json > "$TMP/stripe.json" 2>/dev/null
+  if jq -e '.state' "$TMP/stripe.json" >/dev/null 2>&1; then
+    jq -s '.[0] + {stripe: .[1]}' "$TMP/pay.json" "$TMP/stripe.json" > "$TMP/pay.merged" \
+      && mv "$TMP/pay.merged" "$TMP/pay.json"
+  else
+    jq '. + {stripe: {state:"error", reason:"Stripe-Abfrage lieferte kein verwertbares Ergebnis"}}' \
+      "$TMP/pay.json" > "$TMP/pay.merged" && mv "$TMP/pay.merged" "$TMP/pay.json"
+  fi
 }
 
 # ------------------------------------------------------------------ Ausführung
@@ -590,6 +683,22 @@ else
           + "\n  davon " + (.pay.last30_failed_after_method|tostring) + " Fehlschlag NACH Methodenwahl (echter Zahlungsfehler) · "
           + (.pay.last30_never_started|tostring) + " nie begonnen (Link nicht geöffnet — kein Zahlungsfehler)"
           + (if .pay.reason then "\n  ! " + .pay.reason else "" end)
+          # Stripe steht als eigene Zeile darunter — getrennt, nie in die
+          # Mollie-Summe gerechnet (buzz#36).
+          + "\n  Stripe: " + (
+              if (.pay.stripe.state // "fehlt") == "unconfigured"
+                then "NICHT KONFIGURIERT — " + (.pay.stripe.reason // "kein Key")
+              elif (.pay.stripe.state // "fehlt") == "error"
+                then "FEHLER — " + (.pay.stripe.reason // "ohne Begründung") + " · keine Zahlen (NICHT als 0 zu lesen)"
+              elif (.pay.stripe.state // "fehlt") == "fehlt"
+                then "NICHT ERHOBEN — Stripe-Umsatz ist hier unbekannt, nicht 0"
+              else (.pay.stripe.state|icon) + " " + (.pay.stripe.subscriptions_active|tostring)
+                   + " aktive Subscription(s) · 30 T: " + (.pay.stripe.last30_total|tostring)
+                   + " Zahlungen — " + ((.pay.stripe.last30_by_status // {})|to_entries|map(.key + " " + (.value|tostring))|join(", "))
+                   + (if .pay.stripe.key_kind == "vollzugriff"
+                      then " · ⚠️ der verwendete Key ist ein VOLLZUGRIFFS-Key (sk_), erwartet ist ein Restricted Key (rk_)" else "" end)
+                   + (if .pay.stripe.reason then " · ! " + .pay.stripe.reason else "" end)
+              end)
      end)
     ] | map(select(. != null)) | join("
 
