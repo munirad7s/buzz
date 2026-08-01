@@ -665,6 +665,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            read_empire_snapshot,
+            refresh_empire_snapshot,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,
@@ -948,10 +950,8 @@ pub fn run() {
         .expect("error while building tauri application");
 
     let shutdown_done = Arc::new(AtomicBool::new(false));
-
     #[cfg(unix)]
     shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
-
     let run_shutdown_done = Arc::clone(&shutdown_done);
     let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {

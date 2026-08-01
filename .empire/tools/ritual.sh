@@ -5,6 +5,7 @@
 #                  Lage (inkl. Werkzeugbestand aus nest-doctor.sh, buzz#59) ·
 #                  Entscheidungen · Lücken
 #   gate-batch     20:45 Europe/Berlin — alle offenen blocked-munir als Ein-Zeilen-Entscheidungen
+#                  + CRM-Löschzeile aus Espos Aktionshistorie (buzz#79)
 #   wochen-review  So 18:00 Europe/Berlin — 5 Blöcke: Bewegung · Geld · Entscheidungs-
 #                  Bewegung (gegen Snapshot der Vorwoche) · Vorschlag · Lücken (buzz#63)
 #
@@ -265,6 +266,76 @@ collect_nest() {
   return 0
 }
 
+# (d3) CRM-Löschungen — buzz#79. Nach #29/#52/#53 kann kein API-User mehr fremde
+# Datensätze löschen — aber „kann nicht" ist eine Annahme, solange niemand
+# hinsieht. Espo löscht SOFT: ein gelöschter Lead ist für jeden Lesepfad 404,
+# der Grabstein bleibt liegen. Eine stille Löschwelle senkt KPI-Zahlen und
+# Brief-Vorrat, ohne dass irgendwo etwas rot wird.
+#
+# QUELLENWAHL (drei Kandidaten gemessen, nicht geraten):
+#   • Access-Log des Containers — vollständig, aber ohne Record-Identität
+#     (DELETE /api/v1/Lead/<id> nennt keinen Entity-Namen und keinen User).
+#   • Grabstein `deleted: true` — identitätsgenau, aber ohne Urheber und ohne
+#     verlässlichen Löschzeitpunkt (Espo fasst modified_at beim Remove nicht an).
+#   • `action_history_record` — hat ALLES: user_id, action, target_type,
+#     target_id, created_at. Über die Espo-API wäre das `read: own` und damit
+#     für einen Wächter wertlos; über die DB gelesen braucht es KEINEN neuen
+#     Espo-User und KEINE Rechteerweiterung — genau die Bedingung aus #52/#53.
+#   → gewählt: action_history_record, read-only über den bestehenden ssh-Pfad.
+#
+# Zeitrahmen: Espo schreibt created_at in UTC, der MariaDB-Container läuft in
+# UTC (gemessen: NOW() == UTC_TIMESTAMP()). NOW() - INTERVAL 24 HOUR ist damit
+# derselbe Rahmen wie die Daten — keine Zeitzonen-Verschiebung nötig.
+collect_crm_deletions() {
+  command -v ssh >/dev/null || { gap "CRM-Löschspur nicht erhoben: ssh nicht im PATH"; return 1; }
+  { printf 'CRM_DB_CONTAINER=%s\n' "${RITUAL_CRM_CONTAINER:-agency-crm-mariadb}"
+    printf 'CRM_WINDOW_H=%s\n' "${RITUAL_CRM_WINDOW_H:-24}"
+    # Fenster-Ende = NOW - OFFSET. Default 0 = bis jetzt. Mit Offset lässt sich
+    # jeder vergangene Tag nachschlagen ("was wurde letzten Dienstag gelöscht")
+    # — und die Erwartungs-Zeile gegen einen ruhigen Tag gegenprüfen.
+    printf 'CRM_OFFSET_H=%s\n' "${RITUAL_CRM_OFFSET_H:-0}"
+    cat <<'REMOTE'
+set -u
+if ! command -v docker >/dev/null 2>&1; then
+  echo "crm_err=docker auf dem Server nicht verfuegbar"; echo "REMOTE_DONE=1"; exit 0
+fi
+if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CRM_DB_CONTAINER"; then
+  echo "crm_err=DB-Container $CRM_DB_CONTAINER laeuft nicht"; echo "REMOTE_DONE=1"; exit 0
+fi
+SQL="SELECT CONCAT('crm_row=', IFNULL(u.user_name,'?'), '|', a.target_type, '|', COUNT(*))
+     FROM action_history_record a LEFT JOIN user u ON u.id = a.user_id
+     WHERE a.action = 'delete'
+       AND a.created_at >= NOW() - INTERVAL $((CRM_OFFSET_H + CRM_WINDOW_H)) HOUR
+       AND a.created_at <  NOW() - INTERVAL $CRM_OFFSET_H HOUR
+     GROUP BY u.user_name, a.target_type
+     ORDER BY COUNT(*) DESC;
+     SELECT CONCAT('crm_last=', IFNULL(MAX(a.created_at),'-'))
+     FROM action_history_record a WHERE a.action = 'delete';"
+if OUT=$(printf '%s' "$SQL" | docker exec -i "$CRM_DB_CONTAINER" \
+           sh -c 'exec mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE" -N -B' 2>&1); then
+  printf '%s\n' "$OUT"
+  echo "crm_ok=1"
+else
+  echo "crm_err=SQL fehlgeschlagen: $(printf '%s' "$OUT" | head -c 120 | tr '\n' ' ')"
+fi
+echo "REMOTE_DONE=1"
+REMOTE
+  } | timeout 60 ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+      "${LAGEBILD_SSH_HOST:-hetzner}" 'bash -s' > "$TMP/crm.raw" 2>"$TMP/crm.err"
+
+  # Sentinel wie beim Server-Block: ein halb durchgelaufener ssh-Block ist ein
+  # Fehler, kein "0 Löschungen".
+  if ! grep -q '^REMOTE_DONE=1$' "$TMP/crm.raw" 2>/dev/null; then
+    gap "CRM-Löschspur nicht erhoben: ssh unvollständig ($(head -c 120 "$TMP/crm.err" 2>/dev/null | tr '\n' ' '))"
+    rm -f "$TMP/crm.raw"; return 1
+  fi
+  if ! grep -q '^crm_ok=1$' "$TMP/crm.raw"; then
+    gap "CRM-Löschspur nicht erhoben: $(grep -m1 '^crm_err=' "$TMP/crm.raw" | cut -d= -f2- || echo 'ohne Begründung')"
+    rm -f "$TMP/crm.raw"; return 1
+  fi
+  return 0
+}
+
 # (e) Geschlossene Issues der Woche — buzz#63. Je Repo einzeln, NIE owner-weit:
 # `gh search issues` schneidet bei erreichtem -L still ab, und eine abgeschnittene
 # Bewegungszahl sieht aus wie eine gemessene. Eine Abfrage je Repo macht das
@@ -483,7 +554,11 @@ render_morgenbrief() {
              + ((.server.containers_running // "?")|tostring) + " Container up · "
              + ((.server.containers_unhealthy // "?")|tostring) + " unhealthy"
              + (if ((.server.kuma_down // []) | length) > 0
-                then " · Kuma rot: " + ((.server.kuma_down)|join(", ")) else "" end) else empty end),
+                then " · Kuma rot: " + ((.server.kuma_down)|join(", ")) else "" end)
+             # agency-infra#134: ein Monitor ohne Benachrichtigung wird nie rot
+             # gemeldet — er muss deshalb HIER auffallen, sonst fällt er nie auf.
+             + (if ((.server.kuma_silent // []) | length) > 0
+                then " · Kuma STUMM (alarmiert niemanden): " + ((.server.kuma_silent)|join(", ")) else "" end) else empty end),
           (if (.pay.state? // "") != "" then "   Zahlungen:" + st(.pay.state) + " "
              + ((.pay.subscriptions_active // "?")|tostring) + " aktive Abos · 30 T: "
              + ((.pay.last30_by_status.paid // 0)|tostring) + " bezahlt / "
@@ -536,6 +611,58 @@ render_morgenbrief() {
   printf '%s' "$out"
 }
 
+# CRM-Löschzeile — buzz#79. Schwelle NICHT geraten, sondern aus 8 Tagen
+# Aktionshistorie gemessen: 26.07.–31.07. löschte täglich genau `n8n-agent`
+# 1× Lead + 1× CTouchpoint (der Funnel-Probe aus buzz#53) — sonst nichts.
+# Alles darüber und jeder andere User ist erklärungsbedürftig.
+# 0 Löschungen ist KEIN Ruhezustand: dann hat der Probe nicht gelöscht.
+plural_del() { [ "$1" -eq 1 ] && printf 'Löschung' || printf 'Löschungen'; }
+
+render_crm_deletions() {
+  local win="${RITUAL_CRM_WINDOW_H:-24}" off="${RITUAL_CRM_OFFSET_H:-0}"
+  if [ "$off" -gt 0 ]; then
+    printf '\n**CRM-Löschungen** (%s h, endend vor %s h · Quelle: Espo-Aktionshistorie, read-only über die DB)\n' "$win" "$off"
+  else
+    printf '\n**CRM-Löschungen** (letzte %s h · Quelle: Espo-Aktionshistorie, read-only über die DB)\n' "$win"
+  fi
+  if [ ! -f "$TMP/crm.raw" ]; then
+    printf '   ⚠️ LÜCKE — die Löschspur wurde NICHT erhoben. Das ist kein "0 Löschungen". Siehe Lücken.\n'
+    return
+  fi
+  local total probe rest last
+  total="$(awk -F'|' '/^crm_row=/{s+=$3} END{print s+0}' "$TMP/crm.raw")"
+  probe="$(awk -F'|' '/^crm_row=/{u=$1; sub(/^crm_row=/,"",u);
+             if (u=="n8n-agent" && ($2=="Lead" || $2=="CTouchpoint")) s += ($3>1 ? 1 : $3)}
+           END{print s+0}' "$TMP/crm.raw")"
+  rest=$((total - probe))
+  last="$(grep -m1 '^crm_last=' "$TMP/crm.raw" | cut -d= -f2-)"
+
+  if [ "$total" -eq 0 ]; then
+    printf '   ⚠️ 0 Löschungen — auch der Funnel-Probe hat nichts gelöscht.\n'
+    printf '      Erwartet wären 1× Lead + 1× CTouchpoint (n8n-agent). Prüfen, ob `[BUZZ-53] funnel-probe` noch läuft.\n'
+    printf '      Letzte Löschung überhaupt: %s (UTC)\n' "${last:--}"
+  elif [ "$rest" -eq 0 ]; then
+    # Die Zusammensetzung wird GEMESSEN, nicht behauptet. Eine feste Formel
+    # ("1× Lead + 1× CTouchpoint") wäre bei 1 gelöschtem Lead eine erfundene
+    # Zahl im Führungsbrief — gemessen am 01.08. genau so passiert.
+    local comp
+    comp="$(awk -F'|' '/^crm_row=/{ c = c (c=="" ? "" : ", ") $3 "× " $2 } END{print c}' "$TMP/crm.raw")"
+    printf '   ✅ %s %s — ausschließlich der Funnel-Probe (n8n-agent): %s. Erwartet.\n' \
+      "$total" "$(plural_del "$total")" "$comp"
+  else
+    printf '   ⚠️ %s %s, davon **%s außerhalb des Funnel-Probes** — erklärungsbedürftig:\n' \
+      "$total" "$(plural_del "$total")" "$rest"
+    awk -F'|' '/^crm_row=/{
+          u=$1; sub(/^crm_row=/,"",u);
+          a[u] = a[u] (a[u]=="" ? "" : ", ") $3 "× " $2;
+          t[u] += $3 }
+        END{ for (u in t) printf "%d\t      – %s: %s\n", t[u], u, a[u] }' "$TMP/crm.raw" \
+      | sort -rn | cut -f2-
+    [ "$probe" -eq 0 ] && printf '      – Funnel-Probe (n8n-agent): NICHT gelaufen — zusätzlich prüfen.\n'
+    printf '      Erwartungswert ist 1× Lead + 1× CTouchpoint durch n8n-agent; alles andere braucht eine Erklärung.\n'
+  fi
+}
+
 render_gate_batch() {
   local out="$TMP/brief.md"
   local nb=0; [ -f "$TMP/blocked.json" ] && nb="$(jq -r 'length' "$TMP/blocked.json")"
@@ -559,6 +686,7 @@ render_gate_batch() {
       fi
       printf '\nJede Zeile ist eine Entscheidung, die nur du treffen kannst. Erledigt = Label `blocked-munir` entfernen.\n'
     fi
+    render_crm_deletions
     printf '\n**Lücken**\n'
     if [ -s "$GAPFILE" ]; then sed 's/^/   • /' "$GAPFILE"; else printf '   • keine — alle Repos gelesen\n'; fi
   } > "$out"
@@ -775,6 +903,7 @@ case "$MODE" in
     ;;
   gate-batch)
     collect_blocked
+    collect_crm_deletions || true
     BRIEF="$(render_gate_batch)"
     CH="${BUZZ_CHANNEL:-$CH_GATES}"; LABEL="🔐 Gate-Batch"
     ;;
@@ -810,6 +939,33 @@ else
   [ "$VAULT" = "1" ] && append_vault "$BRIEF" "$LABEL"
 fi
 
-[ "$TRANSPORT_FAIL" = "1" ] && exit 3
-[ -s "$GAPFILE" ] && exit 1
+# --------------------------------------------------------- Lauf-Quittung (#15)
+# Eine Zeile je Lauf, append-only, ausserhalb des oeffentlichen Repos. Sie ist
+# der EINZIGE Beleg dafuer, DASS ein Ritual lief — Kanal-Posts beweisen nur die
+# erfolgreichen Transporte, ein Lauf ohne Transport hinterlaesst dort nichts.
+# Verbraucher: Cockpit-Kachel "Rituale" (#15). Kein Inhalt, nur Metadaten:
+# der Brief selbst kann Kundendaten tragen, diese Zeile nie.
+ritual_receipt() {
+  local rc="$1" file="${RITUAL_RUNS_FILE:-$HOME/.buzz/ritual-runs.jsonl}"
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+  # Naives >> klebt an eine Datei ohne abschliessendes Newline (gemessen bei
+  # vault-log.sh) — deshalb erst pruefen, dann anhaengen.
+  if [ -s "$file" ] && [ "$(tail -c 1 "$file" 2>/dev/null | od -An -c | tr -d ' ')" != '\n' ]; then
+    printf '\n' >> "$file" 2>/dev/null || return 0
+  fi
+  jq -cn --arg ritual "$MODE" --arg label "${LABEL:-}" \
+        --arg at "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --argjson exit_code "$rc" --argjson gaps "$(gapcount)" \
+        --argjson dry_run "$DRY" \
+        --arg transports "$( { [ "$POST" = "1" ] && [ "${BUZZ_OK:-0}" = "1" ] && printf 'buzz '; \
+                               [ "$TG" = "1" ]   && [ "${TG_OK:-0}" = "1" ]   && printf 'telegram '; \
+                               [ "$VAULT" = "1" ] && printf 'vault'; } | tr -s ' ' | sed 's/ $//' )" \
+    '{ritual:$ritual, label:$label, at:$at, exit_code:$exit_code, gaps:$gaps,
+      dry_run:($dry_run==1), transports:($transports|split(" ")|map(select(length>0)))}' \
+    >> "$file" 2>/dev/null || true
+}
+
+if [ "$TRANSPORT_FAIL" = "1" ]; then ritual_receipt 3; exit 3; fi
+if [ -s "$GAPFILE" ]; then ritual_receipt 1; exit 1; fi
+ritual_receipt 0
 exit 0

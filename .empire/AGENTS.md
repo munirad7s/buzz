@@ -187,6 +187,38 @@ Die Bedarfsanalyse war die Arbeit, nicht das Klicken der Rolle. Ergebnis über *
 | `[E2E] funnel-probe` (erzwungene Execution `141536`) | success — Lead über den Live-Funnel angelegt, `CL Delete Lead` ok, `CL Delete TP` ok, Kuma-Up gepingt |
 | ACL-Wächter (#28) gegen den neuen Snapshot | grün, 3/3 User |
 
+### CRM-Löschungen im Gate-Batch (buzz#79 — „gehärtet" ist erst dann „bewiesen sauber")
+
+Nach #29/#52/#53 kann kein API-User mehr fremde Datensätze löschen. „Kann nicht" ist aber eine Annahme, solange niemand hinsieht — und Espo löscht **soft**: ein gelöschter Lead ist für jeden Lesepfad 404, der Grabstein bleibt liegen. Eine stille Löschwelle senkt KPI-Zahlen und Brief-Vorrat, ohne dass irgendwo etwas rot wird. Seit #79 steht **jeden Abend eine Zeile im Gate-Batch**.
+
+**Quellenwahl (drei Kandidaten gemessen, nicht geraten):**
+
+| Quelle | Kann | Kann nicht | Urteil |
+|---|---|---|---|
+| Access-Log des Containers | vollständig, jede DELETE-Zeile | keine Entity-Identität, kein User | verworfen |
+| Grabstein `deleted: true` | identitätsgenau | kein Urheber, kein verlässlicher Löschzeitpunkt (Espo fasst `modified_at` beim Remove nicht an) | verworfen |
+| `action_history_record` | `user_id` + `action` + `target_type` + `target_id` + `created_at` | über die **Espo-API** nur `read: own` → als Wächter wertlos | **gewählt — aber über die DB gelesen** |
+
+Entscheidend: `action_history_record` **read-only über den bestehenden ssh-Pfad** (`docker exec agency-crm-mariadb`) braucht **keinen neuen Espo-User und keine Rechteerweiterung** — genau die Bedingung, die #52/#53 gesetzt haben. Ein Admin-API-Key hätte alles kaputt gemacht, was diese Ticket-Reihe abgebaut hat.
+
+**Schwelle aus 8 Tagen Historie gemessen, nicht gesetzt:** 26.07.–31.07. löschte täglich genau `n8n-agent` **1× Lead + 1× CTouchpoint** (der Funnel-Probe aus #53) — sonst nichts. Alles darüber und jeder andere User ist erklärungsbedürftig und wird namentlich mit Entity und Anzahl aufgeführt.
+
+**0 ist kein Ruhezustand.** Bei 0 Löschungen meldet die Zeile ausdrücklich, dass auch der Funnel-Probe nichts gelöscht hat, und nennt den Zeitpunkt der letzten Löschung überhaupt — sonst sähe ein toter Probe-Workflow wie ein sauberer Tag aus.
+
+**Zeitrahmen:** Espo schreibt `created_at` in UTC, der MariaDB-Container läuft in UTC (gemessen: `NOW() == UTC_TIMESTAMP()`). `NOW() - INTERVAL n HOUR` ist damit derselbe Rahmen wie die Daten. Über `RITUAL_CRM_OFFSET_H` lässt sich jedes vergangene Fenster nachschlagen („was wurde vorgestern gelöscht"), über `RITUAL_CRM_WINDOW_H` seine Länge, über `RITUAL_CRM_CONTAINER` der Ausfall proben.
+
+**Gemessene Falle:** Die erste Fassung schrieb im Gutfall die feste Formel „(n8n-agent, 1× Lead + 1× CTouchpoint)". Bei genau einem gelöschten Lead behauptete der Führungsbrief damit einen CTouchpoint, den es nicht gab — eine erfundene Zahl, gemessen am 01.08. gefangen. Die Zusammensetzung wird jetzt aus den Zeilen gerechnet. **Regel: auch der Gutfall wird gemessen, nicht formuliert.**
+
+**Beweisstand (2026-08-01, alle am laufenden System):**
+
+| # | Probe | Ergebnis |
+|---|---|---|
+| 1 | Ruhetag (24 h endend vor 48 h = 31.07.) | `✅ 2 Löschungen — ausschließlich der Funnel-Probe (n8n-agent): 1× Lead, 1× CTouchpoint. Erwartet.` |
+| 2 | Ausschlag (letzte 24 h, Ticket-Tag) | `⚠️ 61 Löschungen, davon 59 außerhalb des Funnel-Probes` + Aufschlüsselung je User |
+| 3 | Detektor rot→grün | 3-h-Fenster meldete `0 Löschungen`; danach Wegwerf-Lead über `n8n-agent` (`delete: own`) angelegt **und gelöscht** (HTTP 200 / GET danach 404); **dasselbe** 3-h-Fenster meldete `1 Löschung … 1× Lead` |
+| 4 | Quelle tot | `RITUAL_CRM_CONTAINER=gibtsnicht` → `⚠️ LÜCKE — die Löschspur wurde NICHT erhoben. Das ist kein "0 Löschungen"`, Grund benannt, Exit 1 |
+| 5 | Kein neuer Zugang | ACL-Wächter (#28) nach der Arbeit: `OK buzz-agent / OK claude-mcp-admin / OK n8n-agent`, Exit 0 |
+
 ## Approval-Gate (buzz#9 — kein Outbound ohne Freigabe)
 
 Doktrin: `.empire/POLICY.md` (drei Klassen FREI · GATED · VERBOTEN). Werkzeug: `.empire/gate.sh`. Agenten-Kurzfassung liegt in `~/.buzz/AGENTS.md` und erreicht damit alle fünf Nest-Agenten (Bumble, claude, codex, Fizz, Honey).
@@ -1260,15 +1292,44 @@ Die Gmail-Triage des Führungs-Postfachs (buzz#4/#32) hängt an genau einem Refr
 2. **`users.getProfile` + Abgleich gegen das erwartete Postfach.** Ein Token für ein anderes Konto ist kein Fehler, den man sieht — die Triage liest dann still das falsche Postfach.
 3. **Die tatsächlich gewährten Scopes** aus der Token-Antwort gegen die, die die Triage braucht (`gmail.readonly`, `.modify`, `.compose`). Ein still geschrumpfter Scope legt sie genauso lahm wie ein toter Token, nur leiser. Direkte Anwendung der buzz#32-Lektion: **ein Scope ist keine Zusicherung, solange man ihn nicht misst.**
 
-### Warum kein `status=down`-Push
+### Zwei Alarmwege statt einem (buzz#86 — Fehlalarm von Token-Tod getrennt)
 
-Ein down-Push setzt voraus, dass das Script noch läuft. Genau die schlimmsten Fälle — Script kaputt, Node weg, Rechner aus — würden dann still durchgehen. **Das Ausbleiben des Heartbeats ist der Alarm** (Toleranz 26 h, Muster `backup-sh`/`funnel-e2e`; Benachrichtigungen 2+3 = Telegram + Mail, wie bei allen neun bestehenden Push-Monitoren).
+Die ursprüngliche Regel „ein Fehlschlag pusht NICHTS" war richtig, aber unvollständig. Sie machte zwei sehr verschiedene Lagen ununterscheidbar: **„der Token ist tot"** und **„der Rechner war aus"** sahen beide gleich aus — kein Heartbeat — und hätten dieselbe Meldung ausgelöst. Wer die zweite Lage ein paarmal grundlos gemeldet bekommt, schaltet den Wächter stumm; dann schweigt er auch bei der ersten.
 
-Konsequenz, die nicht wegdiskutiert wird: die Aufgabe läuft „Nur interaktiv". **Ein ausgeschalteter oder abgemeldeter Rechner erzeugt nach 26 h denselben Alarm wie ein toter Token.** Das ist bewusst die sichere Richtung (lieber ein Fehlalarm als ein stilles Loch), aber es ist ein Fehlalarm-Risiko — und ein Wächter, dem niemand mehr glaubt, ist schlechter als keiner. Folge-Ticket buzz#86.
+Seit buzz#86 gibt es **zwei** Wege, und der alte bleibt unangetastet:
+
+| Lage | Weg | Wie schnell | Was Munir sieht |
+|---|---|---|---|
+| Probe lief und hat den Token als **tot gemessen** | `status=down`-Push **mit Ursache** | Minuten | `Gmail-Token TOT (invalid_grant) — cd …\google-mcp && npm run auth` |
+| Probe lief **gar nicht** (Rechner aus, Node weg, Script kaputt) | kein Push, Kuma alarmiert nach Toleranz | 26 h | Kuma-Standardmeldung **ohne** Ursachentext |
+
+**Die Unterscheidungsregel ist damit ablesbar, ohne irgendetwas zu prüfen:** Alarm **mit** Ursachentext = handeln (`npm run auth`). Alarm **ohne** Ursachentext = der Rechner war zu lange aus; er **erledigt sich selbst**, sobald der Rechner wieder da ist — dann kommt der Heartbeat und Kuma schickt die Recovery-Mail hinterher.
+
+Damit das wirklich so ist, trägt die Aufgabe seit buzz#86 zwei zusätzliche Eigenschaften (`scripts/token-probe-task-triggers.ps1`, idempotent):
+
+- **`StartWhenAvailable`** — holt den verpassten 07:10-Lauf nach, sobald der Rechner wieder verfügbar ist. Vorher fiel er **ersatzlos** aus (gemessen: die Aufgabe trug nur einen `CalendarTrigger`).
+- **`LogonTrigger` mit 2 Minuten Verzögerung** — deckt lange Aus-Phasen sofort bei der Anmeldung ab.
+
+Der down-Push **ersetzt** die Fail-loud-Eigenschaft also nicht, er ergänzt sie: er beschleunigt genau den Fall, der Geld kostet (Triage des Führungs-Postfachs blind), und lässt den Rest unverändert scharf. Fälle, in denen der Push selbst unmöglich ist (`kuma-token-missing`, `kuma-unreachable`, `kuma-push-failed`), fallen bewusst auf den alten Weg zurück.
+
+### Der Wächter war weicher als dokumentiert (gemessen 2026-08-01)
+
+Monitor 54 stand auf `maxretries=1` bei `retryInterval == interval`. Gemessen (adas-empire#79): ein `status=down` erzeugt bei dieser Einstellung einen Heartbeat mit `status=2` (PENDING) und `important=0` — **es geht keine Benachrichtigung raus**. Erst der nächste fällige Beat nach `retryInterval` macht daraus DOWN. Die dokumentierte 26-h-Toleranz war real **~52 h**, und der neue sofortige down-Push wäre komplett verschluckt worden. Seit buzz#86: `maxretries=0`, und `kuma-add-gmail-token.mjs` zieht Konfigurationsdrift idempotent nach statt nur den Push-Token. Die übrigen sieben Altmonitore tragen denselben Fehler → **agency-infra#135**.
+
+**Die Toleranz gehört ins `interval`, nicht in einen unsichtbaren Retry.**
 
 ### Gemessene Falle: `process.exit()` im offenen fetch-Kontext liefert 127 statt 1
 
-Auf Windows zerreisst ein `process.exit()` aus dem Inneren eines noch offenen `fetch`-Kontexts libuv: `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, Exit **127**. Beim `invalid_grant`-Pfad ist das zugeschnappt — die Meldung war korrekt, der Exit-Code falsch, und bei einem Wächter **ist der Exit-Code der Vertrag**. Behoben: Fehlschläge werden geworfen, der Prozess endet einmal am Ende nach dem Abklingen der Sockets. Regel für jedes Script hier: nie `process.exit()` mitten in einem laufenden HTTP-Aufruf.
+Auf Windows zerreisst ein `process.exit()` aus dem Inneren eines noch offenen `fetch`-Kontexts libuv: `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, Exit **127**. Beim `invalid_grant`-Pfad ist das zugeschnappt — die Meldung war korrekt, der Exit-Code falsch, und bei einem Wächter **ist der Exit-Code der Vertrag**. Regel für jedes Script hier: nie `process.exit()` mitten in einem laufenden HTTP-Aufruf.
+
+**Die erste Reparatur war eine geratene Frist — und die trug nicht.** 60 ms Warten reichten nur, solange der letzte `fetch` der Heartbeat im Erfolgsfall war. Mit dem down-Push aus buzz#86 endet auch der **Fehlerpfad** auf einem frischen `fetch`, und der Fehlschlag lieferte prompt wieder 127 (gemessen; ein zweiter Versuch mit größerer Frist war 1 von 3 Läufen weiterhin rot — eine Frist zu raten ist keine Lösung, sie verschiebt nur die Wahrscheinlichkeit). Tragfähig ist, `process.exit()` im Normalfall **gar nicht** zu rufen:
+
+```js
+process.exitCode = code;
+setTimeout(() => process.exit(code), 2000).unref();
+```
+
+Node endet von selbst, sobald keine Handles mehr offen sind — dann kann die Assertion nicht auftreten. Der `unref()`-Timer hält die Event-Loop nicht am Leben und ist nur die Reissleine, falls Keep-alive-Sockets den Prozess länger offen halten. Gemessen: 9/9 Läufe (6 Fehlerpfad, 3 Erfolgspfad) mit dem erwarteten Code.
 
 Zweite, harmlosere Falle: die `.cmd`-Startrampe schreibt echtes UTF-8 ins Log; `Get-Content` dekodiert per Default ANSI und zeigt `gewÃ¤hrt`. Die Datei ist in Ordnung — der Leser braucht `-Encoding utf8` (oder Git Bash).
 
@@ -1545,3 +1606,56 @@ FROM monitor m WHERE m.active=1 ORDER BY 3;
 - **CRLF + Locale:** `gh`-Ausgaben tragen `\r`, und `comm` braucht `LC_ALL=C`. Ohne `tr -d '\r'` und `LC_ALL=C` meldete der Repo-Abgleich 22 statt 2 fehlende Repos — ein frei erfundener Fund.
 - **Der lokale Arbeitsbaum lügt:** `priorities.json` nannte lokal noch die Bounce-Adresse `munirdue@gmail.com`. Auf `origin/main` war sie längst korrigiert — der lokale Baum hing hinterher und trug zusätzlich fremde uncommittete Arbeit. **Vor jedem „das ist noch kaputt" gegen `origin/main` prüfen, nicht gegen den Baum.**
 - **Der Nenner darf nicht fehlen:** `lagebild.sh` bildet inzwischen die Vereinigung aus `priorities.json` und einer owner-weiten Label-Suche und meldet nicht gelistete Repos namentlich (buzz#61). Gegengeprüft: die Abdeckung stimmt. Ebenso vollständig ist die Kuma-Routenabdeckung — jeder Traefik-Host hat einen Monitor.
+
+---
+
+## Empire-Cockpit im Desktop (buzz#15 — eigener `/empire`-Tab)
+
+**Entschieden: eigener Tab statt Pulse-Erweiterung.** Kriterium aus dem Ticket war die Größe des Upstream-Diffs. Pulse zu erweitern hätte `PulseScreen`/`PulseView`/`PulseTabBar` angefasst — alles Upstream-Dateien, die sich schnell bewegen (im selben Sync-Fenster kamen 7 Upstream-Commits, davon 5 in `desktop/src/features/messages`). Der eigene Tab ist additiv: **ein** neuer Feature-Ordner, **eine** neue Route, und an Upstream-Dateien nur vier Einzeiler (`routes.ts`, `preview-features.json`, Sidebar-Eintrag, zwei Handler-Zeilen in `lib.rs`). Pulse bleibt unberührt und funktionsfähig.
+
+### Die Kacheln und ihre echten Quellen
+
+| Kachel | Quelle | Weg |
+|---|---|---|
+| Gates | offene `blocked-munir`-Issues über alle Repos | `lagebild.sh` (#7) → Snapshot → Tauri-Command |
+| Backlog | `ready` je Priorität + `in-progress` + Repo-Abdeckung | dito |
+| Agenten | `list_managed_agent_runtimes` | direkt aus der Desktop-Laufzeit, kein Snapshot |
+| Rituale | Lauf-Quittungen von `ritual.sh` | `~/.buzz/ritual-runs.jsonl` → Snapshot |
+
+**Kein Doppelbau:** Der Sammler `.empire/tools/cockpit-snapshot.sh` erhebt nichts selbst — er ruft `lagebild.sh --format json --blocks backlog` und liest die Quittungsdatei. Die Gate-Liste (`top_blocked`, Top-3 nach Prio dann Alter) kommt aus den Issues, die der Backlog-Block **ohnehin schon geholt hat**: additive jq-Zeilen in `lagebild.sh`, null zusätzliche API-Aufrufe, dieselbe Sortierung wie `ritual.sh gate-batch`.
+
+**Bewusst nur der backlog-Block.** n8n, Server und Mollie bleiben draußen: ein geöffneter Tab darf kein geteiltes Live-System anfassen. Der Sammler spricht ausschließlich mit GitHub.
+
+### Warum ein Snapshot und nicht Live-Abfragen
+
+Die Webview kann kein `gh`, kein `ssh`, kein `jq`. Ein Live-Cockpit hieße: jede Tab-Öffnung feuert ~28 GitHub-Abfragen. Deshalb: Sammler schreibt **eine** Datei in den Nest, der Tauri-Command `read_empire_snapshot` liest nur diese Datei (Öffnen kostet nichts), `refresh_empire_snapshot` startet den Sammler auf ausdrücklichen Klick. Der Script-Pfad ist fest verdrahtet (`<nest>/cockpit-snapshot.sh`, gespiegelt wie `vault-log.sh`) und nimmt **kein** Argument aus der UI entgegen — der Knopf kann keine Shell werden.
+
+### Keine stillen Nullen — die Regel ist hier Code, nicht Vorsatz
+
+Drei Schichten, jede einzeln testbar:
+
+1. **Sammler:** jeder Block trägt `state` + `reason`; fehlt die Quittungsdatei, steht dort `state:"error"` mit „es ist UNBEKANNT, ob Rituale liefen" — nicht „0 Rituale". Geschrieben wird atomar (`tmp` + `mv`), ein Abbruch hinterlässt nie eine halbe Datei.
+2. **Tauri-Command:** fehlende Datei, leere Datei, kaputtes JSON, JSON-Array, zu große Datei → `snapshot: null` + `readError`. Es gibt keinen Pfad, der ein Default-Objekt zurückgibt.
+3. **Kachel-Modell (`cockpitModel.ts`):** `headline: string | null`. `null` heißt „nicht erhoben" und wird rot gerendert. Ein fehlendes Feld (`blocked`, `ready_total`, eine einzelne Priorität) wird zur Lücke, **nie** zu 0. Eine echte gemessene 0 darf 0 sagen — und sagt dazu „gemessen, nicht angenommen".
+
+Dazu die Alters-Regel: ein Snapshot älter als 12 h behält seine Zahl, wird aber als überholt markiert; **ein Snapshot ohne verwertbaren Zeitstempel gilt als alt**, nicht als frisch (Fehlrichtung immer Richtung Misstrauen).
+
+### Gemessene Fallen
+
+- **`lib.rs` stand exakt auf der 1000-Zeilen-Ratchet** (`desktop/scripts/check-file-sizes.mjs`: Dateien am Limit dürfen nicht wachsen). Zwei Handler-Zeilen kippen `pnpm check` — und zwar **jede** künftige Command-Registrierung, auch upstream. Hier gelöst durch das Zusammenziehen dreier zusammengehöriger Shutdown-Statements (2 Leerzeilen); die eigentliche Lösung ist ein Split von `lib.rs` → Gardener-Ticket.
+- **`routeTree.gen.ts` wird vom Vite-Plugin erzeugt, nicht von `tsc`.** `pnpm build` (= `tsc && vite build`) scheitert deshalb beim ersten Lauf mit einer neuen Route („'/empire' is not assignable to keyof FileRoutesByPath"): der Typcheck läuft, bevor der Generator lief. Reihenfolge: erst `pnpm exec vite build`, dann `pnpm typecheck`.
+- **Ein frischer Worktree hat keine Sidecars.** `cargo check` auf `desktop/src-tauri` stirbt in `build.rs` mit „resource path `binaries\buzz-acp-…exe` doesn't exist". Die `.exe`-Sidecars aus dem Haupt-Checkout **kopieren** (nicht junctionen — siehe die Junction-Lektion oben; und nicht `CARGO_TARGET_DIR` teilen — siehe buzz#83).
+- Der Sidebar-Eintrag navigiert selbst (`useNavigate`) statt über `onSelect…`-Props: der Prop-Weg hätte AppShell, AppSidebar, `useAppNavigation` **und** die geteilte `SidebarSelectedView`-Union angefasst — vier Upstream-Dateien für einen fork-eigenen Tab.
+
+### Beweisstand (2026-08-01)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Stichprobe Backlog | Script `ready`=44 / `blocked`=8 für `munirad7s/spontan` == unabhängige `gh issue list`-Abfrage, exakt |
+| Stichprobe Gates | `top_blocked[0]` = `agency-infra#7`, Labels `blocked-munir,P1-money`, `createdAt` identisch mit `gh issue view` |
+| Rot-Probe Sammler | ohne Quittungsdatei meldet der Ritual-Block „UNBEKANNT, ob Rituale liefen", Exit 1 — nicht „0" |
+| Rust-Unit | 8/8 (`empire_cockpit`) — fehlende/leere/kaputte/Array-JSON-Datei je eigener Test |
+| TS-Unit | 19/19 (`cockpitModel`) — inkl. „fehlendes Feld ist keine 0", „echte 0 darf 0 sagen", Schema-Mismatch, Staleness-Grenze |
+| Gates | `pnpm check` (desktop + web) ✅ · `pnpm typecheck` ✅ · `vite build` ✅ · `cargo fmt --all --check` ✅ · `cargo clippy` desktop-tauri ohne neue Warnung |
+
+**Offene Lücke, ehrlich benannt:** Der gerenderte Screenshot aus der laufenden App fehlt. Die isolierte Dev-Instanz baut und startet von diesem Branch (Onboarding-Screen belegt), aber eine **frische** Dev-Instanz landet im 7-Schritt-Onboarding — der Weg bis zum Tab war im Zeitbudget nicht zu Ende zu gehen. Wer ihn geht: `~/.buzz-dev` ist der Nest der Dev-Instanz, dort müssen `cockpit.json` und `cockpit-snapshot.sh` liegen; ohne `cockpit.json` ist die Rot-Probe geschenkt.

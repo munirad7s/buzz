@@ -373,12 +373,54 @@ installierten App, ohne sie zu berühren.
   not enabled"); auf Windows ist das Upstream-Arbeit, kein Flag-Flip. Eigenes Ticket.
 - **Kein Installieren des gebauten NSIS.** Der Installer würde `%LOCALAPPDATA%\Buzz` überschreiben.
   Er wird gebaut und als Artefakt nachgewiesen, mehr nicht.
-- **Keine Release-Tags auf dem Fork.** Nichts an diesem Fork wird veröffentlicht.
-- ~~Keine Actions-Läufe auf dem Fork~~ — überholt durch buzz#48: der lokale Build bleibt der Beweis
-  für *diese Maschine*, das CI-Gate ist der Beweis für *den Code*. Welche Workflows dabei laufen
-  dürfen, steht in §10.
+- **Keine Release-Tags, keine Signierung, kein Upload zu Releases.**
+- ~~Keine Actions-Läufe auf dem Fork~~ — **überholt durch buzz#48, siehe §10.** Der lokale Build bleibt
+  der Beweis für *diese Maschine*; der Canary beweist zusätzlich, dass der Fork-Code überhaupt noch baut.
 
-## 10. CI auf dem Fork — welche Workflows laufen dürfen
+## 10. CI-Gate auf dem Fork (buzz#48, gemessen 2026-08-01)
+
+**Datei:** `.github/workflows/empire-windows-canary.yml` (Fork-eigen, neben der Upstream-Datei).
+
+**Warum eine zweite Datei.** Der Upstream-Canary `.github/workflows/windows-canary.yml` trägt in der
+Job-Definition `if: github.repository == 'block/buzz'`. Auf jedem Fork wird der Job damit still
+übersprungen — ein `workflow_dispatch` dort meldet **success, ohne eine einzige Zeile gebaut zu haben**.
+Wer das als „Canary läuft grün" liest, hat ein Schein-Gate. Das Fork-Pendant trägt spiegelbildlich
+`if: github.repository == 'munirad7s/buzz'` und ist damit inert, falls es je upstream landet.
+
+**Wann er feuert**
+
+| Auslöser | Wirkung |
+|---|---|
+| `push` auf `main` | läuft — genau der Moment nach einem Upstream-Merge (§7) |
+| `push` auf `main`, aber nur `.empire/**`, `**/*.md`, `docs/**` | läuft **nicht** (`paths-ignore`) — Doku-PRs kosten keine 30+ Windows-Minuten |
+| `workflow_dispatch --ref <branch>` | läuft auf **jedem** Branch — der Merge-Branch lässt sich VOR dem Merge prüfen |
+| zweiter Push während eines Laufs | `concurrency` bricht den älteren ab — eine Agenten-Welle stapelt keine Builds |
+
+**Was der Canary beweist:** der Fork-Code baut auf Windows und liefert einen NSIS-Installer.
+**Was er NICHT beweist:** dass er auf Munirs Maschine baut. Der GitHub-Runner bekommt Hermit
+funktionierend und eine saubere MSVC-Umgebung; lokal ist Hermit inert (§1) und cmake Pflicht (§2).
+**Der Canary ersetzt dieses Dokument nicht** — er kann grün sein, während der lokale Weg gebrochen ist.
+
+**Gemessener Beweisstand (2026-08-01)**
+
+| # | Lauf | Ergebnis |
+|---|---|---|
+| 1 | `push` auf main (PR #102), Run `30712467814` | **success**, 18/18 Steps, 32 min 32 s, kalter Cache |
+| 2 | Artefakt desselben Laufs | `buzz-windows-canary-1-3f3a7535…` — **52 342 569 Bytes** (≈ 49,9 MiB), 7 Tage Retention |
+| 3 | Rot-Probe: `test/48-canary-red` mit absichtlichem Typfehler in `crates/buzz-cli/src/main.rs`, Run `30712632932` | **failure** in Step „Build sidecars": `error[E0308]: mismatched types`, exit 101 — der Detektor wird im Rust-Compile-Pfad rot, nicht an einer Trivialität |
+| 4 | Doku-PR nach `main` (dieser Abschnitt) | **kein** neuer Canary-Lauf — `paths-ignore` greift |
+
+Auslösen von Hand:
+
+```bash
+rtk gh workflow run empire-windows-canary.yml -R munirad7s/buzz --ref <branch>
+rtk gh run list -R munirad7s/buzz --workflow empire-windows-canary.yml -L 3
+```
+
+Timeout steht auf **120 min** statt der 60 upstream: der erste Fork-Lauf ist kalt, und 60 min wären
+ein falsches Rot. Mit warmem `rust-cache` liegt ein Lauf deutlich darunter.
+
+### 10.1 Welche Workflows auf dem Fork überhaupt laufen dürfen (buzz#113)
 
 Seit buzz#48 hängt ein echtes Gate an den Fork-Actions. Ein Gate ist aber nur so viel wert wie die
 Stille drumherum: zwischen dauerhaft roten Läufen fällt ein rotes Gate niemandem auf.
@@ -390,14 +432,14 @@ rolling release" → `release not found`): es gibt kein Rolling-Release auf dem 
 aktualisieren könnte. In einer Agenten-Welle mit mehreren Merges pro Stunde war der Actions-Tab damit
 reines Rauschen.
 
-### 10.1 Aktiv — nur diese zwei
+**Aktiv — nur diese zwei**
 
 | Workflow | Trigger auf dem Fork | Warum er bleibt |
 |---|---|---|
 | `CI` (`ci.yml`) | Push `main`, jeder PR | Die eigentliche Testsuite: Rust Lint, Unit Tests, Desktop E2E, Server-Cross-Compile, `cargo-deny`. Das ist Signal, kein Lärm — der Job `Security` hat am 01.08. RUSTSEC-2026-0224 auf `main` gemeldet, bevor es jemand bemerkt hätte. |
 | `Empire Windows Canary` (`empire-windows-canary.yml`) | Push `main` (mit `paths-ignore` für `.empire/**`, `**/*.md`, `docs/**`), Dispatch | Das Gate aus buzz#48: baut der Fork-Code auf Windows? Fork-eigene Datei, weil der Upstream-Canary auf jedem Fork inert ist. |
 
-### 10.2 Stillgelegt per `gh workflow disable` (Stand 2026-08-01)
+**Stillgelegt per `gh workflow disable` (Stand 2026-08-01)**
 
 `disable` statt Datei-Guard, bewusst: der Zustand liegt bei GitHub, nicht im Baum — er überlebt
 damit jeden `git merge upstream/main`, ohne eine einzige Upstream-Zeile anzufassen. Ein additiver
