@@ -3,6 +3,7 @@ REM .empire/tools/ritual-task.cmd — Startrampe fuer die Windows-Aufgabenplanun
 REM
 REM   ritual-task.cmd morgenbrief
 REM   ritual-task.cmd gate-batch
+REM   ritual-task.cmd wochen-review     (buzz#63, So 18:00)
 REM
 REM Warum die Aufgabenplanung und nicht der Buzz-Workflow-Cron: der Relay-
 REM Scheduler feuert die Ritual-Workflows nachweislich nicht (Messung in
@@ -14,7 +15,7 @@ REM Relay-Schluessel aus dem Windows Credential Manager, und dessen
 REM Benutzer-Tresor ist ohne Benutzersitzung nicht entschluesselbar.
 setlocal
 if not "%~1"=="" goto :havemode
-echo usage: ritual-task.cmd morgenbrief ^| gate-batch
+echo usage: ritual-task.cmd morgenbrief ^| gate-batch ^| wochen-review
 exit /b 64
 :havemode
 
