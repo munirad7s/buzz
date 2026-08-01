@@ -789,7 +789,21 @@ Ein **mehrzeiliges** `node -e '…'` führt in dieser Umgebung (Git Bash + Volta
 
 Zweite Falle derselben Klasse: `console.log` unmittelbar vor `process.exit(0)` verliert unter Windows die Ausgabe, wenn stdout eine Pipe ist — der Handshake schreibt deshalb mit `fs.writeSync(1, …)`.
 
-**Offen (bewusst nicht gemacht):** die Einhängung in den Morgenbrief (`.empire/tools/ritual.sh`, buzz#10). Das Script war beim Bau dieses Tickets gerade frisch gemerged und gehört einem parallel laufenden Agenten — ein Eingriff hätte einen Konflikt in einer 473-Zeilen-Datei riskiert, die hier niemand verifizieren konnte. Der Hook ist ein Dreizeiler: `bash "$HERE/nest-doctor.sh" --format json` einsammeln, bei `exit != 0` eine Zeile „Werkzeugbestand driftet" in den Lage-Block schreiben.
+### Einhängung in den Morgenbrief (nachgeholt 2026-08-01, DoD-Punkt 2)
+
+`ritual.sh morgenbrief` sammelt den Doctor als Quelle (d2) ein und rendert eine `Werkzeuge:`-Zeile im Lage-Block (3). Damit steht der Werkzeugbestand jeden Morgen neben Backlog, n8n, Server und Zahlungen.
+
+Die entscheidende Unterscheidung — dieselbe, die `collect_lagebild` schon für `warn` trifft: **`nest-doctor` Exit 1 (Drift) ist ein inhaltlicher Befund und gehört in den Lage-Block; nur Exit 2 / unbrauchbares JSON ist eine Erhebungslücke** und landet in Block 5. Wäre Drift eine „Lücke", sähe ein echter Werkzeugausfall wie ein Messfehler aus — und umgekehrt.
+
+```
+   Werkzeuge: 5/5 MCP-Server einsatzbereit                                       # grün
+   Werkzeuge: ❌ 4/5 … — rot: telegram-mcp (FEHLER:spawn-ENOENT)                 # Server tot
+   Werkzeuge: ❌ 0/5 … · Nest NICHT getraut — .mcp.json wird ignoriert           # Trust weg
+   Werkzeuge: ❌ 5/5 … · Agenten laufen mit ALTEM Werkzeugkasten                  # Prozess-Drift
+   Werkzeuge: ⚠️ LÜCKE — Nest-Doctor nicht erhoben (siehe Block 5)               # Erhebung tot
+```
+
+**Falle, die die Rot-Probe gefunden hat:** `nest-doctor.sh` schreibt seine Abbruch-Gründe auf **stdout**, nicht auf stderr. Ein naives `head -c 140 "$TMP/nest.err"` liefert deshalb einen leeren Grund — die Lücke stünde ohne Ursache im Brief, eine stille Null in Prosa-Form. `collect_nest` fällt darum auf den stdout-Inhalt zurück und zuletzt auf `keine Ausgabe`.
 ### Workflow-Quellen (Export 2026-08-01, Kanal `#general` `96067fa5-…`)
 
 Beide Workflows sind editiert, nicht dupliziert (`workflows delete` wird angenommen, löscht aber nicht — Neutralisieren geht nur über `enabled: false`). Owner ist der Agent-Pubkey `78be5e27…`; NIP-33-Ersetzung funktioniert nur mit demselben Schlüssel, deshalb muss `buzzx.sh --key agent:<pubkey>` verwendet werden.

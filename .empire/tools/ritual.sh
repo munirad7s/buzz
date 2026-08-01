@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ritual.sh — die beiden Führungsrituale auf echten Daten (buzz#10)
 #
-#   morgenbrief  08:45 Europe/Berlin — 5 Blöcke: Top-3 · Inbox · Lage · Entscheidungen · Lücken
+#   morgenbrief  08:45 Europe/Berlin — 5 Blöcke: Top-3 · Inbox · Lage (inkl.
+#                Werkzeugbestand aus nest-doctor.sh, buzz#59) · Entscheidungen · Lücken
 #   gate-batch   20:45 Europe/Berlin — alle offenen blocked-munir als Ein-Zeilen-Entscheidungen
 #
 # Aufruf:
@@ -193,6 +194,33 @@ collect_inbox() {
   return 0
 }
 
+# (d2) Werkzeugbestand — buzz#59. Ein Führungs-Agent, der glaubt ein Werkzeug zu
+# haben, das er nicht hat, improvisiert — und improvisierte Führung ist falsche
+# Führung. Genau das war in buzz#3 wochenlang unsichtbar: drei "verdrahtete"
+# MCP-Server waren für die Agenten lautlos nicht vorhanden. Deshalb steht der
+# Werkzeugbestand ab jetzt jeden Morgen im Brief.
+#
+# WICHTIG: nest-doctor.sh Exit 1 heißt "Drift gefunden" — das ist ein INHALTLICHER
+# Befund und gehört in den Lage-Block, nicht in die Lücken-Liste (gleiche
+# Unterscheidung wie bei lagebild.sh warn). Nur Exit 2 / unbrauchbares JSON ist
+# eine Erhebungslücke.
+collect_nest() {
+  bash "$HERE/nest-doctor.sh" --format json > "$TMP/nest.json" 2>"$TMP/nest.err"
+  local rc=$?
+  if [ ! -s "$TMP/nest.json" ] || ! jq -e '.servers' "$TMP/nest.json" >/dev/null 2>&1; then
+    # nest-doctor.sh meldet seine Abbruch-Gründe auf stdout, nicht auf stderr
+    # (gemessen: `NEST_DIR=/weg` → stderr leer, Grund steht in der JSON-Datei).
+    # Ohne diesen Fallback stünde im Brief eine Lücke OHNE Grund — eine stille
+    # Null in Prosa-Form.
+    local why; why="$(head -c 140 "$TMP/nest.err" | tr -d '\n')"
+    [ -n "$why" ] || why="$(head -c 140 "$TMP/nest.json" | tr -d '\n')"
+    [ -n "$why" ] || why="keine Ausgabe"
+    gap "Nest-Doctor (#59) lieferte kein verwertbares JSON (exit $rc): $why"
+    rm -f "$TMP/nest.json"; return 1
+  fi
+  return 0
+}
+
 # (d) Foki — die drei #-Überschriften aus Now.md. Vault ist Kanon.
 collect_foki() {
   if [ ! -f "$NOW_MD" ]; then
@@ -291,6 +319,20 @@ render_morgenbrief() {
         ] | .[]' "$TMP/lage.json" | tr -d "$CR"
     else
       printf '   ⚠️ LÜCKE — Lagebild nicht erhoben (siehe Block 5)\n'
+    fi
+    if [ -f "$TMP/nest.json" ]; then
+      jq -r '
+        (.servers|length) as $n |
+        ([.servers[]|select(.status=="ok")]|length) as $ok |
+        ([.servers[]|select(.status!="ok")|.name + " (" + .status + ")"]) as $bad |
+        "   Werkzeuge:" + (if .exit == 0 then "" else " ❌" end)
+        + " " + ($ok|tostring) + "/" + ($n|tostring) + " MCP-Server einsatzbereit"
+        + (if ($bad|length) > 0 then " — rot: " + ($bad|join(", ")) else "" end)
+        + (if .trust_accepted != "true" then " · Nest NICHT getraut — .mcp.json wird ignoriert" else "" end)
+        + (if .process_drift == "ja" then " · Agenten laufen mit ALTEM Werkzeugkasten (Neustart im Desktop nötig)" else "" end)
+      ' "$TMP/nest.json" | tr -d "$CR"
+    else
+      printf '   Werkzeuge: ⚠️ LÜCKE — Nest-Doctor nicht erhoben (siehe Block 5)\n'
     fi
 
     printf '\n**4) Deine Entscheidungen** (offene `blocked-munir`)\n'
@@ -439,6 +481,7 @@ case "$MODE" in
   morgenbrief)
     collect_foki
     collect_lagebild "backlog,n8n,server,pay"
+    collect_nest
     collect_inbox
     collect_blocked
     BRIEF="$(render_morgenbrief)"
