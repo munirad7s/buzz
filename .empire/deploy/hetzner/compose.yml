@@ -1,0 +1,179 @@
+name: buzz
+
+# Eigener Buzz-Relay auf adas-hetzner (buzz#2).
+# Deployed nach /opt/buzz/compose.yml — Secrets liegen daneben in /opt/buzz/.env
+# (chmod 600, NIE im Repo; Spiegel unter ~/.secrets/buzz-relay.env).
+#
+# Abweichungen von deploy/compose/compose.yml (Upstream-Referenz):
+#   1. Alle Service-Namen `buzz-*` präfixiert. Compose zwingt den Service-Namen
+#      als Netzwerk-Alias auf; generische Namen (postgres/redis/minio) am
+#      externen `coolify`-Netz kollidieren mit Fremd-Stacks.
+#   2. KEINE Host-Ports. Der Zugang läuft ausschließlich über den bestehenden
+#      coolify-proxy (Traefik v3.6) via Labels.
+#   3. `traefik.docker.network=coolify` ist Pflicht — sonst wählt Traefik bei
+#      Multi-Homed-Containern die Backend-IP zufällig (504-Roulette).
+#   4. Nur der Relay hängt am `coolify`-Netz; DB/Cache/S3 bleiben auf dem
+#      privaten `buzz-internal`-Netz und sind von außen unerreichbar.
+#   5. Memory-Limits, weil adas-hetzner ein geteiltes Live-System ist.
+
+services:
+  buzz-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    container_name: buzz-relay
+    env_file:
+      - .env
+    environment:
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_METRICS_PORT: "9102"
+      DATABASE_URL: postgres://${POSTGRES_USER:-buzz}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@buzz-postgres:5432/${POSTGRES_DB:-buzz}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@buzz-redis:6379
+      BUZZ_S3_ENDPOINT: http://buzz-minio:9000
+      BUZZ_S3_ADDRESSING_STYLE: path
+      BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
+      BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
+      BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
+      BUZZ_GIT_REPO_PATH: /data/git
+      BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-true}
+      BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
+    volumes:
+      - buzz-git-data:/data/git
+    depends_on:
+      buzz-postgres:
+        condition: service_healthy
+      buzz-redis:
+        condition: service_healthy
+      buzz-minio:
+        condition: service_healthy
+      buzz-minio-init:
+        condition: service_completed_successfully
+    # /dev/tcp statt curl/wget: das Runtime-Image hat bash, aber keinen HTTP-Client.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - buzz-internal
+      - coolify
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: coolify
+      traefik.http.routers.buzz-relay-http.entrypoints: http
+      traefik.http.routers.buzz-relay-http.rule: Host(`buzz.adas.casa`)
+      traefik.http.routers.buzz-relay-http.middlewares: buzz-relay-redirect
+      traefik.http.middlewares.buzz-relay-redirect.redirectscheme.scheme: https
+      traefik.http.routers.buzz-relay-https.entrypoints: https
+      traefik.http.routers.buzz-relay-https.rule: Host(`buzz.adas.casa`)
+      traefik.http.routers.buzz-relay-https.tls: "true"
+      traefik.http.routers.buzz-relay-https.tls.certresolver: letsencrypt
+      traefik.http.services.buzz-relay.loadbalancer.server.port: "3000"
+
+  buzz-postgres:
+    image: postgres:17-alpine
+    container_name: buzz-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-buzz}
+      POSTGRES_USER: ${POSTGRES_USER:-buzz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - buzz-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 512m
+    networks:
+      - buzz-internal
+
+  buzz-redis:
+    image: redis:7-alpine
+    container_name: buzz-redis
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - buzz-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    mem_limit: 256m
+    networks:
+      - buzz-internal
+
+  buzz-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: buzz-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
+    volumes:
+      - buzz-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 512m
+    networks:
+      - buzz-internal
+
+  buzz-minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: buzz-minio-init
+    depends_on:
+      buzz-minio:
+        condition: service_healthy
+    environment:
+      BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
+      BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
+      BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
+    entrypoint: >
+      /bin/sh -euc '
+        mc alias set local http://buzz-minio:9000 "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}"
+        mc mb --ignore-existing "local/$${BUZZ_S3_BUCKET}"
+        mc anonymous set none "local/$${BUZZ_S3_BUCKET}"
+      '
+    restart: "no"
+    networks:
+      - buzz-internal
+
+volumes:
+  buzz-postgres-data:
+    labels:
+      com.buzz.volume: postgres
+  buzz-redis-data:
+    labels:
+      com.buzz.volume: redis
+  buzz-minio-data:
+    labels:
+      com.buzz.volume: minio
+  buzz-git-data:
+    labels:
+      com.buzz.volume: git
+
+networks:
+  buzz-internal:
+    driver: bridge
+    labels:
+      com.buzz.network: internal
+  coolify:
+    external: true
