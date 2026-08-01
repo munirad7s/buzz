@@ -281,10 +281,56 @@ Relay** — wer beide bedienen will, startet zwei Harness-Prozesse mit zwei Iden
 | `buzz.exe` in Git Bash nicht gefunden | Sidecar liegt nicht im PATH | mit vollem Pfad aufrufen |
 | Argumente kommen verstümmelt an | PowerShell 5.1 zerlegt CLI-Argumente | Buzz-CLI-Kommandos in Git Bash ausführen |
 | Antwort erscheint doppelt | Harness liefert bei mehreren Tool-Runden mehrere Posts | kosmetisch; `BUZZ_AGENT_MAX_ROUNDS` senken |
+| `systemctl is-active` grün, Agent trotzdem stumm | Prozessstatus sagt nichts über Relay-Draht, LLM-Kontingent oder Provider-Fehler | Liveness-Probe: `bash /opt/buzz-agents/liveness-probe.sh --no-push` |
+| Log wächst nicht, obwohl der Agent arbeitet | `RUST_LOG=buzz_acp=info` protokolliert nur Lebenszyklus — Nachrichtenverarbeitung erzeugt **keine** Zeile (gemessen: Antwort in 3 s, 0 Log-Zeilen) | Das Log ist **kein** Liveness-Signal. Immer die Probe fragen. |
+| Log nach der Rotation ist „binary file matches" | `copytruncate` kürzt die Datei auf 0, der offene Schreib-FD behält seinen Offset → NUL-Loch am Anfang | normal, kein Datenverlust; `grep -a` bzw. `less` benutzen |
+| Agent stumm, im Kanal steht `429`/`404`/`422` | freies Modell am Rate-Limit, verschwunden oder schema-inkompatibel | `bash /opt/buzz-agents/sentry-set-model.sh <modell>` — prüft das neue Modell mit einer echten Antwort und rollt bei Stille selbst zurück |
+| Nach einem Reboot fehlt ein Heartbeat, der Agent lebt aber | Timer-Lauf fiel in die Startphase | `OnBootSec=5min` + `Persistent=true` im Timer holen den Lauf nach |
 
 ---
 
-## 8. Gerät wieder abnehmen
+## 8. Dauerbetrieb eines Server-Agenten (buzz#77)
+
+Ein Gerät, das Laptops überleben soll, braucht mehr als eine systemd-Unit. Referenz ist
+`Sentry` auf adas-hetzner; die Werkzeuge liegen in `.empire/tools/` und werden nach
+`/opt/buzz-agents/` kopiert.
+
+**Der Kern in einem Satz: Prozessstatus ist kein Lebenszeichen.** Gemessen am 2026-08-01
+beantwortete Sentry eine echte Mention in 3 Sekunden, ohne dabei eine einzige Log-Zeile zu
+schreiben — und umgekehrt kann derselbe Prozess munter laufen, während der Relay-Draht ab,
+das Kontingent leer oder der Provider auf 429 steht. Weder `systemctl is-active` noch das
+Log können den Unterschied zeigen. Nur eine echte Antwort kann es.
+
+| Baustein | Was | Wo |
+|---|---|---|
+| Log-Rotation | `daily`, `rotate 7`, `compress`, **`copytruncate`** (Pflicht: `append:`-Ziele vertragen kein Umbenennen) | `/etc/logrotate.d/buzz-agents` |
+| Liveness-Probe | postet alle 30 min eine Mention mit Einmal-Token in `diag-liveness` und akzeptiert nur eine Antwort **von genau diesem Pubkey** mit diesem Token | `.empire/tools/sentry-liveness-probe.sh` |
+| Zeitgeber | systemd-Timer, `OnBootSec=5min`, `Persistent=true` | `.empire/tools/buzz-sentry-liveness.timer.example` |
+| Alarm | Kuma-Push-Monitor `sentry-liveness`, Toleranz 2 h, `maxretries=0` | `.empire/tools/kuma-add-sentry-liveness.mjs` |
+| Modellwechsel | setzt Modell, startet neu, **beweist** mit einer echten Antwort, rollt bei Stille selbst zurück | `.empire/tools/sentry-set-model.sh` |
+
+Drei Entscheidungen, die nicht willkürlich sind:
+
+- **Eigene Identität für die Probe.** Sie signiert mit einem eigenen Schlüssel auf Sentrys
+  Allowlist (`/opt/buzz-agents/liveness.conf`, `chmod 600`). Munirs Owner-Key bleibt auf
+  seinem Gerät — Schlüssel verlassen ihr Gerät nicht (§4.2).
+- **Toleranz 2 h, nicht 30 min.** Jede Probe kostet einen echten LLM-Aufruf, und freie
+  Modelle antworten gelegentlich mit 429. Bei knapper Toleranz weckt der Wächter Munir bei
+  jedem Provider-Schluckauf — und ein Wächter, dem man nicht glaubt, ist schlechter als
+  keiner. 2 h verzeiht drei Fehlschläge in Folge und meldet echte Stille am selben Tag.
+- **Kein eigener Alarm für `429`/`404`.** Ein Modellausfall macht den Agenten stumm, und
+  Stille misst die Probe bereits. Ein zweiter Detektor für dieselbe Wirkung wäre doppelte
+  Pflege und ein zweiter Fehlalarm-Weg.
+
+**Die Toleranz gehört ins `interval`, nicht in `maxretries`.** Gemessen (adas-empire#79):
+ein `status=down` auf einen Monitor mit `maxretries=1` erzeugt `status=2` (PENDING) mit
+`important=0` — es geht **keine** Benachrichtigung raus. Erst der nächste fällige Beat nach
+`retryInterval` macht daraus DOWN. Bei `retryInterval == interval` verdoppelt das die Zeit
+bis zum Alarm, lautlos.
+
+---
+
+## 9. Gerät wieder abnehmen
 
 1. Harness stoppen (`systemctl disable --now buzz-<rolle>` bzw. Prozess beenden).
 2. `buzz-admin remove-member --pubkey <hex>` — die Identität verliert den Relay-Zugang
