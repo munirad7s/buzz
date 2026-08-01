@@ -554,7 +554,11 @@ render_morgenbrief() {
              + ((.server.containers_running // "?")|tostring) + " Container up · "
              + ((.server.containers_unhealthy // "?")|tostring) + " unhealthy"
              + (if ((.server.kuma_down // []) | length) > 0
-                then " · Kuma rot: " + ((.server.kuma_down)|join(", ")) else "" end) else empty end),
+                then " · Kuma rot: " + ((.server.kuma_down)|join(", ")) else "" end)
+             # agency-infra#134: ein Monitor ohne Benachrichtigung wird nie rot
+             # gemeldet — er muss deshalb HIER auffallen, sonst fällt er nie auf.
+             + (if ((.server.kuma_silent // []) | length) > 0
+                then " · Kuma STUMM (alarmiert niemanden): " + ((.server.kuma_silent)|join(", ")) else "" end) else empty end),
           (if (.pay.state? // "") != "" then "   Zahlungen:" + st(.pay.state) + " "
              + ((.pay.subscriptions_active // "?")|tostring) + " aktive Abos · 30 T: "
              + ((.pay.last30_by_status.paid // 0)|tostring) + " bezahlt / "
