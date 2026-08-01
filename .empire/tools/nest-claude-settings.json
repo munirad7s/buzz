@@ -1,0 +1,31 @@
+{
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "telegram-mcp",
+    "espo-mcp",
+    "google-mcp",
+    "obsidian-mcp-tools",
+    "n8n-api"
+  ],
+  "permissions": {
+    "deny": [
+      "mcp__n8n-api__n8n_create_workflow",
+      "mcp__n8n-api__n8n_update_full_workflow",
+      "mcp__n8n-api__n8n_update_partial_workflow",
+      "mcp__n8n-api__n8n_delete_workflow",
+      "mcp__n8n-api__n8n_autofix_workflow",
+      "mcp__n8n-api__n8n_deploy_template",
+      "mcp__n8n-api__n8n_generate_workflow",
+      "mcp__n8n-api__n8n_test_workflow",
+      "mcp__n8n-api__n8n_manage_credentials",
+      "mcp__n8n-api__n8n_manage_datatable",
+      "mcp__obsidian-mcp-tools__create_vault_file",
+      "mcp__obsidian-mcp-tools__update_active_file",
+      "mcp__obsidian-mcp-tools__patch_vault_file",
+      "mcp__obsidian-mcp-tools__patch_active_file",
+      "mcp__obsidian-mcp-tools__delete_vault_file",
+      "mcp__obsidian-mcp-tools__delete_active_file",
+      "mcp__obsidian-mcp-tools__execute_template"
+    ]
+  }
+}
