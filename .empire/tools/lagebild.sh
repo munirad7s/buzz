@@ -392,9 +392,15 @@ block_pay() {
     | ($pays[0]._embedded.payments) as $p
     | ($p | map(select(.createdAt >= $since30))) as $p30
     | ($s | map(select(.status=="active"))) as $act
+    # Ein "expired" ohne gewählte Methode ist KEIN Zahlungsfehler: der Checkout-Link
+    # wurde nie geöffnet. Beides in einen Topf zu werfen erzeugt Dauer-Fehlalarm —
+    # gemessen an social-poster-wizard#83, wo 13 "fehlgeschlagene" Zahlungen nach
+    # Prüfung ausnahmslos nie begonnene Checkouts waren.
+    | ($p30 | map(select((.status=="failed" or .status=="expired") and (.method != null)))) as $real_fail
+    | ($p30 | map(select((.status=="failed" or .status=="expired") and (.method == null)))) as $never_started
     | {
         state: (if ($act|length) == 0 then "warn"
-                elif ($p30|map(select(.status=="failed" or .status=="expired"))|length) > 0 then "warn"
+                elif ($real_fail|length) > 0 then "warn"
                 else "ok" end),
         subscriptions_active: ($act|length),
         subscriptions_by_status: ($s | group_by(.status) | map({key:.[0].status, value:length}) | from_entries),
@@ -403,10 +409,12 @@ block_pay() {
                                       + (if $amounts == 1 then {amount:(.amount.value + " " + .amount.currency)} else {} end))),
         last30_by_status: ($p30 | group_by(.status) | map({key:.[0].status, value:length}) | from_entries),
         last30_total: ($p30|length),
+        last30_failed_after_method: ($real_fail|length),
+        last30_never_started: ($never_started|length),
         mrr_eur: (if $amounts == 1 then ($act|map(.amount.value|tonumber)|add // 0) else null end),
         reason: (if ($act|length) == 0 then "keine aktive Subscription"
-                 elif ($p30|map(select(.status=="failed" or .status=="expired"))|length) > 0
-                   then (($p30|map(select(.status=="failed" or .status=="expired"))|length)|tostring) + " fehlgeschlagene/abgelaufene Zahlung(en) in 30 Tagen"
+                 elif ($real_fail|length) > 0
+                   then (($real_fail|length)|tostring) + " Zahlung(en) NACH der Methodenwahl fehlgeschlagen — echter Zahlungsfehler"
                  else null end)
       }' > "$TMP/pay.json" 2>/dev/null \
     || block_error pay "Aggregation der Mollie-Antwort fehlgeschlagen"
@@ -497,6 +505,8 @@ else
           + (if .pay.mrr_eur then " · MRR " + (.pay.mrr_eur|tostring) + " EUR" else "" end)
           + "\n  Letzte 3 Zahlungen: " + (.pay.last_payments | map(.status + " (" + (.method // "?") + ", " + .at + ")") | join(" · "))
           + "\n  30 Tage: " + (.pay.last30_total|tostring) + " Zahlungen — " + (.pay.last30_by_status|to_entries|map(.key + " " + (.value|tostring))|join(", "))
+          + "\n  davon " + (.pay.last30_failed_after_method|tostring) + " Fehlschlag NACH Methodenwahl (echter Zahlungsfehler) · "
+          + (.pay.last30_never_started|tostring) + " nie begonnen (Link nicht geöffnet — kein Zahlungsfehler)"
           + (if .pay.reason then "\n  ! " + .pay.reason else "" end)
      end)
     ] | map(select(. != null)) | join("
