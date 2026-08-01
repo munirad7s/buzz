@@ -332,7 +332,16 @@ if command -v docker >/dev/null 2>&1; then
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$KUMA_CONTAINER"; then
     if docker exec "$KUMA_CONTAINER" sqlite3 "file:/app/data/kuma.db?mode=ro" \
          "SELECT 'kuma_row=' || h.status || '|' || m.name FROM monitor m JOIN heartbeat h ON h.id=(SELECT id FROM heartbeat WHERE monitor_id=m.id ORDER BY time DESC LIMIT 1) WHERE m.active=1;" 2>/dev/null
-    then echo "kuma_ok=1"; else echo "kuma_ok=0"; fi
+    then
+      # agency-infra#134: aktive Monitore OHNE jede Benachrichtigung. Ein
+      # stummer Waechter ist teurer als keiner, weil man sich auf ihn
+      # verlaesst — gobd-export (steuerliche Aufbewahrungspflicht) hing so da.
+      # Bewusst eine eigene Abfrage OHNE heartbeat-JOIN: ein Push-Monitor, der
+      # noch nie gepusht hat, faellt aus der Zeile oben komplett heraus.
+      docker exec "$KUMA_CONTAINER" sqlite3 "file:/app/data/kuma.db?mode=ro" \
+        "SELECT 'kuma_silent=' || m.name FROM monitor m WHERE m.active=1 AND NOT EXISTS (SELECT 1 FROM monitor_notification mn WHERE mn.monitor_id=m.id);" 2>/dev/null
+      echo "kuma_ok=1"
+    else echo "kuma_ok=0"; fi
   else
     echo "kuma_ok=0"
   fi
@@ -362,19 +371,23 @@ REMOTE
   kuma_ok="$(grep -m1 '^kuma_ok=' "$TMP/server.raw" | cut -d= -f2)"
 
   grep '^kuma_row=' "$TMP/server.raw" | sed 's/^kuma_row=//' > "$TMP/kuma.txt" || true
+  grep '^kuma_silent=' "$TMP/server.raw" | sed 's/^kuma_silent=//' > "$TMP/kuma_silent.txt" || true
 
   jq -n \
     --arg uptime_days "${uptime_days:-}" --arg load1 "${load1:-}" \
     --arg disk_pct "${disk_pct:-}" --arg disk_avail "${disk_avail:-}" \
     --arg docker_ok "${docker_ok:-0}" --arg running "${running:-}" \
     --arg exited "${exited:-}" --arg unhealthy "${unhealthy:-}" \
-    --arg kuma_ok "${kuma_ok:-0}" --rawfile kuma "$TMP/kuma.txt" '
+    --arg kuma_ok "${kuma_ok:-0}" --rawfile kuma "$TMP/kuma.txt" \
+    --rawfile kuma_silent "$TMP/kuma_silent.txt" '
     ($kuma | split("\n") | map(select(length>0) | split("|") | {status:(.[0]|tonumber), name:(.[1:]|join("|"))})) as $mon
     | ($mon|map(select(.status==0))) as $down
     | ($mon|map(select(.status==2))) as $pending
+    | ($kuma_silent | split("\n") | map(select(length>0))) as $silent
     | {
         state: (if ($docker_ok != "1") or ($kuma_ok != "1") then "warn"
                 elif ($down|length) > 0 then "warn"
+                elif ($silent|length) > 0 then "warn"
                 elif (($disk_pct|tonumber?) // 0) >= 90 then "warn"
                 elif (($unhealthy|tonumber?) // 0) > 0 then "warn"
                 else "ok" end),
@@ -390,9 +403,11 @@ REMOTE
         kuma_active: ($mon|length),
         kuma_down: ($down|map(.name)),
         kuma_pending: ($pending|map(.name)),
+        kuma_silent: $silent,
         reason: (if ($docker_ok != "1") then "docker auf dem Host nicht abfragbar"
                  elif ($kuma_ok != "1") then "Uptime-Kuma nicht lesbar — Monitor-Status UNBEKANNT, nicht grün"
                  elif ($down|length) > 0 then (($down|length)|tostring) + " Monitor(e) rot"
+                 elif ($silent|length) > 0 then (($silent|length)|tostring) + " Monitor(e) STUMM (keine Benachrichtigung): " + ($silent|join(", "))
                  elif (($disk_pct|tonumber? // 0) >= 90) then "Disk >= 90 %"
                  elif (($unhealthy|tonumber? // 0) > 0) then "unhealthy Container"
                  else null end)
@@ -540,6 +555,9 @@ else
           + "\n  Kuma: " + (if .server.kuma_readable then (.server.kuma_active|tostring) + " aktiv · " + (.server.kuma_down|length|tostring) + " rot"
                             + (if (.server.kuma_down|length) > 0 then " (" + (.server.kuma_down|join(", ")) + ")" else "" end)
                             + (if (.server.kuma_pending|length) > 0 then " · " + (.server.kuma_pending|length|tostring) + " pending (" + (.server.kuma_pending|join(", ")) + ")" else "" end)
+                            + (if ((.server.kuma_silent // [])|length) > 0
+                               then " · " + ((.server.kuma_silent|length)|tostring) + " STUMM (" + (.server.kuma_silent|join(", ")) + ")"
+                               else "" end)
                           else "NICHT LESBAR — Status unbekannt" end)
           + (if .server.reason then "\n  ! " + .server.reason else "" end)
      end),
