@@ -67,8 +67,10 @@ rtk gh issue comment <nr> -R munirad7s/buzz -b "🐝 buzz_empire $(date '+%Y-%m-
 git checkout -b feat/<issue-nr>-<slug>
 rtk git add -A && rtk git commit -m "<warum> (#<nr>)"
 git push -u origin feat/<issue-nr>-<slug>
-rtk gh pr create --fill && rtk gh pr merge --squash --delete-branch
+rtk gh pr create --repo munirad7s/buzz --base main --head feat/<issue-nr>-<slug> --fill
+rtk gh pr merge <pr-nr> -R munirad7s/buzz --squash --delete-branch
 ```
+⚠️ **`gh pr create --fill` ohne `--repo` zielt in einem Fork auf UPSTREAM** (`block/buzz`) — die Falle ist am 01.08. einmal zugeschnappt (block/buzz#4095, sofort geschlossen). `--repo`/`-R` ist deshalb Pflicht, bei `create` UND bei `merge`. Passiert es doch: `rtk gh pr close <nr> -R block/buzz -c "<kurze Entschuldigung>"`, dann korrekt neu aufmachen.
 
 ### Schritt 6 — Abschließen
 ```bash
