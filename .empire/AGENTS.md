@@ -1813,7 +1813,6 @@ Zwei Wege konnten die Härtung aus buzz#52 (CRM-Key von 61 Scopes auf einen) in 
 - **Der Push-Hook blockt auch `master`, nicht nur `main`.** `git push origin master` wird pre-execution abgewiesen und nimmt die ganze `&&`-Kette mit (auch den Commit davor). Immer Feature-Branch → PR.
 - **Der Secret-Hook greift auch auf Fließtext.** Eine Lektion, die einen Variablennamen mit angehängtem Gleichheitszeichen enthielt, wurde als Secret-Write abgewiesen — Erklärtexte über Secrets ohne dieses Muster schreiben.
 - **Bestätigt: mehrzeiliges `node -e '…'` tut in Git Bash gar nichts** (Exit 0, keine Ausgabe). Die Rot-Probe lief erst, nachdem sie in einer `.mjs`-Datei stand.
-
 ## Stripe im Lagebild — gebaut, aber ohne Key blind (buzz#36)
 
 Der `pay`-Block trägt jetzt ein eigenes Unterobjekt `.pay.stripe` (`stripe_json()` in `lagebild.sh`). **Getrennt von Mollie, nie summiert** — ein toter Anbieter darf nicht in einer Gesamtsumme verschwinden.
