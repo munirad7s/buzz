@@ -1351,3 +1351,53 @@ Der Beweis läuft über einen mitschreibenden ACP-Agenten (Recorder) und über d
 - **OpenRouter-`:free`-Slugs verfallen.** `deepseek/deepseek-chat-v3-0324:free` antwortet mit 404 und nennt den kostenpflichtigen Slug als Ersatz. Die aktuelle Free-Liste mit Tool-Support kommt aus `/api/v1/models` (`select(.id|endswith(":free")) | select(.supported_parameters|index("tools"))`).
 - **`--heartbeat-interval` muss 0 oder ≥ 10 Sekunden sein** — kleinere Werte sind ein Startfehler.
 - **buzz-acp-Tests verschmutzen den Repo-Baum:** die `steer-capture`-Tests schreiben unter Windows Dateien wie `crates/buzz-acp/C:UsersrescueAppData…json` ins Arbeitsverzeichnis (Pfad-Mangling). Vor dem Commit `git status` prüfen und **nie** `git add -A` nach einem Testlauf.
+---
+
+## Drittes Führungsritual: Wochen-Review So 18:00 (buzz#63)
+
+`ritual.sh wochen-review` — dieselbe Mechanik wie Morgenbrief und Gate-Batch (Script misst, Agent transportiert), aber die Frage ist eine andere: **nicht „was ist heute los", sondern „was hat sich bewegt und woran arbeiten wir nächste Woche".** Tagesrituale halten den Betrieb; das Wochenritual richtet ihn aus.
+
+### Fünf Blöcke
+
+| # | Block | Quelle |
+|---|---|---|
+| 1 | Bewegung — geschlossene Issues der laufenden ISO-Woche | `gh issue list -R <repo> --state closed --search "closed:>=<Montag>"`, **je Repo einzeln** |
+| 2 | Geld | `lagebild.sh --blocks pay` (Mollie) + Delta gegen die Vorwoche |
+| 3 | Entscheidungen — neu / gelöst / liegengeblieben | offene `blocked-munir` gegen den Snapshot der Vorwoche |
+| 4 | Vorschlag kommende Woche | `lagebild.sh` `backlog.top_money`, mit ältesten `ready`-P1 aufgefüllt |
+| 5 | Lücken | wie bei den anderen Ritualen |
+
+### Das Wochen-Gedächtnis
+
+Ein Wochen-Delta braucht eine Vorwoche. Je Lauf entsteht `~/.buzz/ritual-snapshots/<ISO-Woche>.json` (blocked-Liste, closed-Count, pay-Block, nicht gelesene Repos). Bewusst **außerhalb des öffentlichen Repos** — die Liste enthält Issue-Kennungen aus Kunden-Repos.
+
+Reihenfolge im Ablauf ist bindend: **erst die Vorwoche lesen, dann diese Woche schreiben.** Andersherum überschreibt der zweite Lauf einer Woche seine eigene Vergleichsbasis und meldet danach dauerhaft „0 Bewegung".
+
+**Die gefährlichste Falschaussage dieses Rituals wäre „0 neu, 0 gelöst" im ersten Lauf** — das sieht aus wie eine ruhige Woche und ist in Wahrheit eine fehlende Messung. Fehlt der Snapshot, steht deshalb wörtlich `⚠️ Vergleichsbasis fehlt — neu/gelöst/liegengeblieben sind UNBEKANNT, nicht 0.` War der Vergleichs-Snapshot selbst unvollständig (Repos nicht lesbar), wird das als Messartefakt-Warnung mitgeliefert, statt Phantom-„neu" und Phantom-„gelöst" als Bewegung zu verkaufen.
+
+### Warum je Repo und nicht owner-weit
+
+`gh search issues` schneidet bei erreichtem `-L` **still** ab. Eine abgeschnittene Bewegungszahl ist von einer gemessenen nicht zu unterscheiden. Eine Abfrage je Repo macht das Limit sichtbar: Repo am Limit → Lücke („die Summe ist eine Untergrenze"), Repo nicht lesbar → Lücke („zählt NICHT als 0"). Gegengeprüft am 01.08.: `--search "closed:>=…"` und eine ungefilterte Liste liefern für `munirad7s/buzz` beide 23.
+
+### Gemessen: der Relay parst Quartz-Cron
+
+`cron: "0 16 * * 0"` wird **hart abgewiesen** — der Relay expandiert auf sieben Felder (`sec min hour dom month dow year`) und verlangt Wochentag ≥ 1. Sonntag ist dort `1`, nicht `0`. Deshalb steht im Workflow der **Name**: `0 16 * * SUN`. Für die täglichen Rituale war das nie sichtbar, weil `* * *` keinen Wochentag nennt.
+
+### Betrieb
+
+- **Produktiver Auslöser:** Windows-Aufgabe `Buzz-Ritual-Wochen-Review`, sonntags 18:00 **Ortszeit** über `.empire/tools/ritual-task.cmd wochen-review` (kein DST-Bruch, gleiche Begründung wie buzz#10).
+- **Workflow-Pendant** für den Tag, an dem der Relay-Scheduler wieder feuert: `Weekly Review` in `#general` (`fcf927c7-d7e0-45fb-bedc-b9ecbeb4718d`), Definition versioniert unter `.empire/workflows/wochen-review.yaml`.
+- Optionen für Proben: `--since YYYY-MM-DD` (anderes Fenster), `--no-snapshot` (schreibt kein Gedächtnis), `RITUAL_SNAPSHOT_DIR` (isoliertes Gedächtnis).
+
+### Beweisstand (2026-08-01)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Lauf ohne Vergleichsbasis | „Vergleichsbasis fehlt … NICHT 0, sondern unbekannt" — **keine stille Null** |
+| Delta gegen Fixture A (3 entfernt, 2 Phantome) | neu **3**, gelöst **2**, liegengeblieben **86** — exakt die Vorhersage |
+| Delta gegen Fixture B (10 entfernt, 0 Phantome, unvollständiger Snapshot) | neu **10**, gelöst **0**, liegengeblieben **79** + Messartefakt-Warnung — der Detektor folgt den Daten |
+| Geld-Delta | Fixture A `Vorgänge +5, bezahlt +1` · Fixture B `−6 / −2` |
+| Stichproben gegen `gh` | `social-poster-wizard` 20 (8 💶) ✓ · `agency-infra` 12 ✓ · `blocked-munir` owner-weit 89 ✓ |
+| Echter Lauf, drei Transporte | Kanal `#general` (Event `cf7285c0112e5e4c`), Telegram `message_id 114`, Tagesnotiz-Zeile |
+
+**Befund fürs Lagebild, nicht fürs Ritual:** owner-weit existiert genau **ein** offenes `ready`-P1-money. Ein Vorschlagsblock, der deshalb einzeilig bleibt, sieht aus wie ein Fehler — er wird sichtbar mit den ältesten `ready`-P1 aufgefüllt und die Herkunft je Zeile benannt (`[💶P1-money]` / `[P1]`). Aufgefüllt wird nur, nie ersetzt.

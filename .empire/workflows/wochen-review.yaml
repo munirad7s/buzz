@@ -1,0 +1,31 @@
+name: Weekly Review
+description: "So 18:00 Europe/Berlin. Cron laeuft UTC (timezone-Feld wird still ignoriert): 0 16 * * SUN = 18:00 CEST; ab Winterzeit 25.10.2026 auf 0 17 aendern. Der Wochentag MUSS als Name stehen: der Relay parst Quartz-Cron (7 Felder, Wochentag 1-7) und weist '0' hart ab - gemessen buzz#63. Inhalt kommt aus .empire/tools/ritual.sh wochen-review (gemessen), nicht aus Modellwissen. Achtung: der Relay-Scheduler feuert Workflows Stand 2026-08-01 NICHT (gemessen, buzz#10/#60) - der echte Ausloeser ist die Windows-Aufgabe Buzz-Ritual-Wochen-Review. Dieser Workflow ist das Pendant fuer den Tag, an dem der Scheduler wieder feuert."
+enabled: true
+trigger:
+  on: schedule
+  cron: "0 16 * * SUN"
+steps:
+  - id: ask_claude
+    action: send_message
+    text: |
+      @claude WOCHEN-REVIEW So 18:00 (Europe/Berlin).
+
+      Fuehre GENAU dieses Kommando aus und poste nichts anderes:
+
+        bash C:/Users/rescue/projects/buzz/.empire/tools/ritual.sh wochen-review --post --telegram --vault
+
+      Das Script erhebt selbst: geschlossene Issues der laufenden ISO-Woche je
+      Repo, den Mollie-Block ueber .empire/tools/lagebild.sh, die Bewegung der
+      offenen blocked-munir gegen den Snapshot der Vorwoche
+      (~/.buzz/ritual-snapshots/) und den Vorschlag fuer die kommende Woche.
+      Es stellt in Kanal, Telegram und Tagesnotiz zu und schreibt den Snapshot
+      dieser Woche.
+
+      Regeln: Erfinde keine Zahlen. Ergaenze keine Bloecke. Bewerte nicht und
+      motiviere nicht - das Ritual beantwortet was sich bewegt hat und woran
+      naechste Woche gearbeitet wird, sonst nichts. Fuelle keine Luecke aus dem
+      Gedaechtnis: meldet das Script "Vergleichsbasis fehlt", ist das KEINE
+      Null-Bewegung und wird nicht zu einer gerundet.
+      Exit 0 = vollstaendig, 1 = mit benannten Luecken, 2 = kein Brief
+      erzeugbar, 3 = ein Transport tot. Bei Exit 2 oder 3: melde den Exit-Code
+      hier im Kanal und poste KEINEN Ersatzbrief.

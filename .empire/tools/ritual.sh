@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# ritual.sh — die beiden Führungsrituale auf echten Daten (buzz#10)
+# ritual.sh — die drei Führungsrituale auf echten Daten (buzz#10, buzz#63)
 #
-#   morgenbrief  08:45 Europe/Berlin — 6 Blöcke: Top-3 · Termine (buzz#62) · Inbox ·
-#                Lage (inkl. Werkzeugbestand aus nest-doctor.sh, buzz#59) ·
-#                Entscheidungen · Lücken
-#   gate-batch   20:45 Europe/Berlin — alle offenen blocked-munir als Ein-Zeilen-Entscheidungen
+#   morgenbrief    08:45 Europe/Berlin — 6 Blöcke: Top-3 · Termine (buzz#62) · Inbox ·
+#                  Lage (inkl. Werkzeugbestand aus nest-doctor.sh, buzz#59) ·
+#                  Entscheidungen · Lücken
+#   gate-batch     20:45 Europe/Berlin — alle offenen blocked-munir als Ein-Zeilen-Entscheidungen
+#   wochen-review  So 18:00 Europe/Berlin — 5 Blöcke: Bewegung · Geld · Entscheidungs-
+#                  Bewegung (gegen Snapshot der Vorwoche) · Vorschlag · Lücken (buzz#63)
 #
 # Aufruf:
 #   bash .empire/tools/ritual.sh morgenbrief                      # nur rendern (stdout)
 #   bash .empire/tools/ritual.sh morgenbrief --post --telegram --vault
 #   bash .empire/tools/ritual.sh gate-batch  --post --telegram --vault
 #   bash .empire/tools/ritual.sh gate-batch  --redact              # ohne Kundendaten (Issue-Beweise)
+#   bash .empire/tools/ritual.sh wochen-review --post --telegram --vault
+#   bash .empire/tools/ritual.sh wochen-review --since 2026-07-20 --no-snapshot   # Probe
 #
 # Exit-Codes (beantworten NUR die Erhebung, nie die Lage):
 #   0 = alle Quellen geliefert · 1 = Brief steht, aber mit benannten Lücken
@@ -43,6 +47,10 @@ EXTRA_REPOS="${RITUAL_EXTRA_REPOS:-munirad7s/buzz}"
 VAULT_LOG="${RITUAL_VAULT_LOG:-$HOME/.buzz/vault-log.sh}"
 MCP_CONFIG="${RITUAL_MCP_CONFIG:-$HOME/.buzz/.mcp.json}"
 NOW_MD="${RITUAL_NOW_MD:-$HOME/Documents/Ai_Brain/99 System/Now.md}"
+# Wochen-Gedächtnis (buzz#63). Bewusst AUSSERHALB des öffentlichen Repos:
+# die Snapshots enthalten Issue-Titel aus Kunden-Repos.
+SNAPDIR="${RITUAL_SNAPSHOT_DIR:-$HOME/.buzz/ritual-snapshots}"
+SINCE=""; SNAPSHOT=1
 # Kanäle: Morgenbrief in #general, Gate-Batch in #gates (Prefix-Router buzz#..)
 CH_GENERAL="${RITUAL_CH_GENERAL:-96067fa5-a135-595f-9869-4fce8786f389}"
 CH_GATES="${RITUAL_CH_GATES:-ac129605-42b4-4ef7-ad70-584cc24a4f58}"
@@ -57,14 +65,16 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --channel) BUZZ_CHANNEL="$2"; shift 2 ;;
     --lines) BRIEF_LIMIT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --since) SINCE="$2"; shift 2 ;;
+    --no-snapshot) SNAPSHOT=0; shift ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unbekannte Option: $1" >&2; exit 64 ;;
   esac
 done
 
 case "$MODE" in
-  morgenbrief|gate-batch) ;;
-  *) echo "usage: ritual.sh <morgenbrief|gate-batch> [--post --telegram --vault --redact --dry-run]" >&2; exit 64 ;;
+  morgenbrief|gate-batch|wochen-review) ;;
+  *) echo "usage: ritual.sh <morgenbrief|gate-batch|wochen-review> [--post --telegram --vault --redact --dry-run --since YYYY-MM-DD --no-snapshot]" >&2; exit 64 ;;
 esac
 
 for t in jq curl gh; do command -v "$t" >/dev/null || { echo "$t fehlt" >&2; exit 2; }; done
@@ -76,6 +86,13 @@ CLOCK="$(date '+%H:%M')"
 GAPFILE="$TMP/gaps"; : > "$GAPFILE"
 gap() { printf '%s\n' "$1" >> "$GAPFILE"; }
 gapcount() { wc -l < "$GAPFILE" | tr -d ' '; }
+
+# Woche = ISO-Woche (Mo–So). Der Sonntag 18:00-Lauf schaut auf die Woche, in der
+# er selbst steht — deshalb wird der Montag aus dem ISO-Wochentag zurückgerechnet
+# und nicht per `last monday` geraten (das liefert am Montag die Vorwoche).
+WEEK_ID="$(date '+%G-W%V')"
+WEEK_START="${SINCE:-$(date -d "-$(( $(date '+%u') - 1 )) days" '+%Y-%m-%d')}"
+WEEK_LABEL="KW $(date '+%V') ($(date -d "$WEEK_START" '+%d.%m.') – $(date '+%d.%m.%Y'))"
 
 # ------------------------------------------------------------------ Quellen
 
@@ -245,6 +262,109 @@ collect_nest() {
     gap "Nest-Doctor (#59) lieferte kein verwertbares JSON (exit $rc): $why"
     rm -f "$TMP/nest.json"; return 1
   fi
+  return 0
+}
+
+# (e) Geschlossene Issues der Woche — buzz#63. Je Repo einzeln, NIE owner-weit:
+# `gh search issues` schneidet bei erreichtem -L still ab, und eine abgeschnittene
+# Bewegungszahl sieht aus wie eine gemessene. Eine Abfrage je Repo macht das
+# Limit sichtbar (Repo am Limit → Lücke, nicht "genau 100").
+CLOSED_LIMIT=200
+collect_closed() {
+  local repo capped="" unreadable=""
+  mkdir -p "$TMP/cl"
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    (
+      slug="$(printf '%s' "$repo" | tr '/' '~')"
+      if out="$(gh issue list -R "$repo" --state closed --search "closed:>=$WEEK_START" \
+                 -L "$CLOSED_LIMIT" --json number,title,labels,closedAt,url 2>/dev/null </dev/null)"; then
+        printf '%s' "$out" | jq --arg repo "$repo" 'map({repo:$repo, number, title, url, closedAt,
+                                                         labels:(.labels|map(.name))})' \
+          > "$TMP/cl/$slug.json" 2>/dev/null
+      fi
+    ) &
+    while [ "$(jobs -rp | wc -l)" -ge 8 ]; do sleep 0.2; done
+  done < <(repo_list)
+  wait
+
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    local f="$TMP/cl/$(printf '%s' "$repo" | tr '/' '~').json"
+    if [ ! -f "$f" ]; then unreadable="$unreadable $repo"; continue; fi
+    [ "$(jq -r 'length' "$f" 2>/dev/null || echo 0)" -ge "$CLOSED_LIMIT" ] && capped="$capped $repo"
+  done < <(repo_list)
+  [ -n "$unreadable" ] && gap "geschlossene Issues nicht lesbar für:$unreadable (fehlen in der Summe, zählen NICHT als 0)"
+  [ -n "$capped" ] && gap "geschlossene Issues am Limit ($CLOSED_LIMIT) in:$capped — die Summe ist eine Untergrenze"
+
+  if ! ls "$TMP/cl"/*.json >/dev/null 2>&1; then
+    gap "geschlossene Issues: kein einziges Repo lesbar — Bewegungs-Block hat keine Datenbasis"
+    return 1
+  fi
+  jq -s 'add | sort_by(.closedAt) | reverse' "$TMP/cl"/*.json > "$TMP/closed.json" 2>/dev/null \
+    || { gap "geschlossene Issues: Aggregation fehlgeschlagen"; rm -f "$TMP/closed.json"; return 1; }
+  return 0
+}
+
+# (e2) Auffüller für den Vorschlag — buzz#63. `lagebild.sh` liefert höchstens die
+# drei ältesten ready-P1-money. Gemessen am 01.08.: es gibt owner-weit genau EINEN.
+# Ein Vorschlagsblock, der dann still einzeilig bleibt, sieht aus wie ein Fehler —
+# also wird sichtbar mit den ältesten ready-P1 aufgefüllt und die Herkunft je
+# Zeile benannt. Aufgefüllt wird NUR, nie ersetzt: P1-money bleibt vorn.
+collect_fillers() {
+  local out
+  if ! out="$(gh search issues --owner munirad7s --state open --label ready --label P1 \
+               --sort created --order asc --json repository,number,title,labels -L 30 2>/dev/null)"; then
+    gap "Vorschlag: P1-Auffüller nicht erhoben (gh search fehlgeschlagen) — Block 4 kann kürzer als 3 sein"
+    return 1
+  fi
+  printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+    gap "Vorschlag: P1-Auffüller lieferte kein Array — Block 4 kann kürzer als 3 sein"; return 1; }
+  printf '%s' "$out" | jq '[.[] | {repo: .repository.nameWithOwner, number, title,
+                                   labels: (.labels|map(.name))}
+                            | select((.labels|index("blocked-munir"))|not)
+                            | select((.labels|index("in-progress"))|not)
+                            | select((.labels|index("P1-money"))|not)]' > "$TMP/fillers.json" 2>/dev/null
+  return 0
+}
+
+# (f) Wochen-Gedächtnis — buzz#63. Der Vergleich braucht eine Vorwoche; fehlt
+# sie, ist das eine LÜCKE und keine "0 Bewegung". Genau diese Verwechslung wäre
+# im ersten Lauf die gefährlichste Falschaussage des Rituals.
+load_prev_snapshot() {
+  [ -d "$SNAPDIR" ] || { gap "Vergleichsbasis fehlt — noch kein Snapshot-Verzeichnis ($SNAPDIR). Die Bewegungszahlen unter 3) sind NICHT 0, sondern unbekannt."; return 1; }
+  local prev
+  prev="$(ls -1 "$SNAPDIR"/*.json 2>/dev/null | sort | awk -v cur="$SNAPDIR/$WEEK_ID.json" '$0 < cur' | tail -1)"
+  if [ -z "$prev" ] || [ ! -s "$prev" ] || ! jq -e '.blocked' "$prev" >/dev/null 2>&1; then
+    gap "Vergleichsbasis fehlt — kein verwertbarer Snapshot vor $WEEK_ID. Die Bewegungszahlen unter 3) sind NICHT 0, sondern unbekannt."
+    return 1
+  fi
+  cp "$prev" "$TMP/prev.json"
+  PREV_WEEK="$(jq -r '.week // "unbekannt"' "$TMP/prev.json")"
+  # Ein Snapshot, dem Repos fehlten, erzeugt Phantom-"neu" und Phantom-"gelöst".
+  local pu; pu="$(jq -r '.repos_unreadable // [] | join(" ")' "$TMP/prev.json")"
+  [ -n "$pu" ] && gap "Vergleichs-Snapshot $PREV_WEEK war unvollständig (nicht gelesen: $pu) — neu/gelöst können Messartefakte enthalten"
+  return 0
+}
+
+write_snapshot() {
+  [ "$SNAPSHOT" = "1" ] || { echo "snapshot: --no-snapshot gesetzt, nichts geschrieben" >&2; return 0; }
+  mkdir -p "$SNAPDIR" || { gap "Snapshot-Verzeichnis $SNAPDIR nicht anlegbar — nächste Woche fehlt die Vergleichsbasis"; return 1; }
+  local unread="[]"
+  grep -q 'blocked-munir nicht lesbar' "$GAPFILE" 2>/dev/null && \
+    unread="$(grep -m1 'blocked-munir nicht lesbar' "$GAPFILE" | sed 's/.*für://; s/ (fehlen.*//' | tr ' ' '\n' | awk 'NF' | jq -R . | jq -s .)"
+  jq -n \
+    --arg week "$WEEK_ID" --arg start "$WEEK_START" --arg at "$(date -Is)" \
+    --argjson blocked "$( [ -f "$TMP/blocked.json" ] && jq '[.[] | "\(.repo)#\(.number)"]' "$TMP/blocked.json" || echo null )" \
+    --argjson closed  "$( [ -f "$TMP/closed.json" ]  && jq 'length' "$TMP/closed.json" || echo null )" \
+    --argjson pay "$( [ -f "$TMP/lage.json" ] && jq '.pay // null' "$TMP/lage.json" || echo null )" \
+    --argjson unread "$unread" \
+    '{week:$week, week_start:$start, generated_at:$at,
+      blocked:$blocked, blocked_count:($blocked|if .==null then null else length end),
+      closed_count:$closed, pay:$pay, repos_unreadable:$unread}' \
+    > "$SNAPDIR/$WEEK_ID.json" 2>/dev/null \
+    || { gap "Snapshot $WEEK_ID.json konnte nicht geschrieben werden"; return 1; }
+  echo "snapshot: $SNAPDIR/$WEEK_ID.json geschrieben" >&2
   return 0
 }
 
@@ -445,6 +565,114 @@ render_gate_batch() {
   printf '%s' "$out"
 }
 
+# Wochen-Review — buzz#63. Bewegung, Geld, Entscheidungen, Vorschlag, Lücken.
+# Keine Bewertung, keine Motivation, keine Wunschliste: das Ritual beantwortet
+# „was hat sich bewegt" und „woran arbeiten wir nächste Woche" — sonst nichts.
+render_wochen_review() {
+  local out="$TMP/brief.md"
+  local nrepos; nrepos="$(repo_list | wc -l | tr -d ' ')"
+  {
+    printf '📊 **WOCHEN-REVIEW** — %s, Stand %s (Europe/Berlin)\n' "$WEEK_LABEL" "$CLOCK"
+
+    printf '\n**1) Bewegung** (geschlossene Issues seit %s, je Repo einzeln gemessen)\n' "$WEEK_START"
+    if [ -f "$TMP/closed.json" ]; then
+      local ct money
+      ct="$(jq -r 'length' "$TMP/closed.json")"
+      money="$(jq -r '[.[]|select(.labels|index("P1-money"))]|length' "$TMP/closed.json")"
+      if [ "$ct" -eq 0 ]; then
+        printf '   0 geschlossene Issues in %s gescannten Repos — diese Woche stand der Backlog still.\n' "$nrepos"
+      else
+        local nactive; nactive="$(jq -r '[.[].repo]|unique|length' "$TMP/closed.json")"
+        printf '   **%s geschlossen** in %s Repos (von %s gescannt), davon %s 💶P1-money\n' "$ct" "$nactive" "$nrepos" "$money"
+        jq -r 'group_by(.repo)
+               | map({repo:.[0].repo, n:length,
+                      money:([.[]|select(.labels|index("P1-money"))]|length)})
+               | sort_by(-.n) | .[0:8][]
+               | "   • \(.repo|sub("^munirad7s/";"")): \(.n)\(if .money>0 then " (\(.money) 💶)" else "" end)"' \
+          "$TMP/closed.json"
+        [ "$nactive" -gt 8 ] && printf '   … und %s weitere Repos mit Bewegung\n' "$((nactive-8))"
+      fi
+    else
+      printf '   ⚠️ LÜCKE — keine Datenbasis. Das ist KEIN "nichts bewegt". Siehe 5).\n'
+    fi
+
+    printf '\n**2) Geld** (Quelle: Mollie über `lagebild.sh`)\n'
+    local pst; pst="$( [ -f "$TMP/lage.json" ] && jq -r '.pay.state // "fehlt"' "$TMP/lage.json" | tr -d "$CR" || echo fehlt )"
+    if [ "$pst" = "ok" ] || [ "$pst" = "warn" ]; then
+      jq -r '.pay |
+        "   • aktive Abos: \(.subscriptions_active // "?")   ·   MRR: " +
+          (if .mrr_eur == null then "LÜCKE (nicht erhoben)" else "\(.mrr_eur) €" end),
+        "   • letzte 30 Tage: \(.last30_total // 0) Zahlungsvorgänge — " +
+          ((.last30_by_status // {}) | to_entries | map("\(.value) \(.key)") | join(", ")),
+        "     davon \(.last30_failed_after_method // 0) NACH der Methodenwahl gescheitert (echter Fehler), \(.last30_never_started // 0) nie gestartet",
+        (if (.last_payments // []) | length > 0
+         then "   • letzte Zahlung: \(.last_payments[0].status) / \(.last_payments[0].method) / \(.last_payments[0].at)"
+         else "   • letzte Zahlung: LÜCKE — keine Zahlung im Fenster" end)' "$TMP/lage.json" | tr -d "$CR"
+      if [ -f "$TMP/prev.json" ] && jq -e '.pay.last30_total' "$TMP/prev.json" >/dev/null 2>&1; then
+        local pt ct2 pp cp
+        pt="$(jq -r '.pay.last30_total' "$TMP/prev.json")";      ct2="$(jq -r '.pay.last30_total // 0' "$TMP/lage.json")"
+        pp="$(jq -r '.pay.last30_by_status.paid // 0' "$TMP/prev.json")"; cp="$(jq -r '.pay.last30_by_status.paid // 0' "$TMP/lage.json")"
+        printf '   • ggü. %s: Vorgänge %+d, bezahlt %+d\n' "$PREV_WEEK" "$((ct2-pt))" "$((cp-pp))"
+      else
+        printf '   • Wochen-Delta: LÜCKE — keine Geld-Vergleichsbasis (siehe 5)\n'
+      fi
+    else
+      printf '   ⚠️ LÜCKE — Zahlungs-Block nicht erhoben (%s). Keine Zahl ist hier besser als eine erfundene.\n' "$pst"
+    fi
+
+    printf '\n**3) Entscheidungen** (offene `blocked-munir` über %s Repos)\n' "$nrepos"
+    if [ ! -f "$TMP/blocked.json" ]; then
+      printf '   ⚠️ LÜCKE — blocked-munir nicht erhoben. Das ist KEIN "keine offenen Gates". Siehe 5).\n'
+    else
+      local nb; nb="$(jq -r 'length' "$TMP/blocked.json")"
+      printf '   Stand jetzt: **%s offen**\n' "$nb"
+      if [ ! -f "$TMP/prev.json" ]; then
+        printf '   ⚠️ Vergleichsbasis fehlt — neu/gelöst/liegengeblieben sind UNBEKANNT, nicht 0.\n'
+        printf '   Ab nächstem Sonntag steht hier die echte Bewegung (Snapshot %s ist jetzt geschrieben).\n' "$WEEK_ID"
+      else
+        jq -r --slurpfile prev "$TMP/prev.json" '
+          ($prev[0].blocked // []) as $p |
+          ([.[] | "\(.repo)#\(.number)"]) as $c |
+          ($c - $p) as $new | ($p - $c) as $gone | ($c - $new) as $stay |
+          "   • neu diese Woche: \($new|length)",
+          "   • gelöst: \($gone|length)",
+          "   • liegengeblieben: \($stay|length)"' "$TMP/blocked.json"
+        printf '   (Vergleich gegen Snapshot %s)\n' "$PREV_WEEK"
+        jq -r --slurpfile prev "$TMP/prev.json" '
+          ($prev[0].blocked // []) as $p |
+          [.[] | select(("\(.repo)#\(.number)") as $k | $p | index($k))]
+          | sort_by(.createdAt) | .[0:1][]
+          | "   • ältester Liegengebliebener: \(.repo|sub("^munirad7s/";""))#\(.number) — \(.title|.[0:70])"' \
+          "$TMP/blocked.json" 2>/dev/null
+      fi
+    fi
+
+    printf '\n**4) Vorschlag kommende Woche** (ältestes offenes `ready` zuerst — P1-money vor P1)\n'
+    local tm=""
+    if [ -f "$TMP/lage.json" ]; then
+      tm="$(jq -r --slurpfile f "${TMP}/fillers.json" '
+        ([$f[0] // []] | flatten) as $fill |
+        ((.backlog.top_money // []) | map(. + {src:"💶P1-money"})) as $money |
+        (($money + ($fill | map({repo, number, title, src:"P1"}))) | .[0:3]) | to_entries[] |
+        "   \(.key+1). [\(.value.src)] \(.value.repo|sub("^munirad7s/";""))#\(.value.number) — \(.value.title|.[0:80])"' \
+        "$TMP/lage.json" 2>/dev/null | tr -d "$CR")"
+    fi
+    if [ -n "$tm" ]; then
+      printf '%s\n' "$tm"
+      local nmoney=0
+      [ -f "$TMP/lage.json" ] && nmoney="$(jq -r '.backlog.top_money // [] | length' "$TMP/lage.json" | tr -d "$CR")"
+      [ "$nmoney" -lt 3 ] && printf '   (nur %s offene ready-P1-money owner-weit — Rest ist mit ready-P1 aufgefüllt)\n' "$nmoney"
+      printf '   Vorschlag aus gemessener Prio, keine Zuweisung.\n'
+    else
+      printf '   ⚠️ LÜCKE — kein Vorschlag ableitbar (Backlog-Block nicht erhoben oder leer).\n'
+    fi
+
+    printf '\n**5) Lücken**\n'
+    if [ -s "$GAPFILE" ]; then sed 's/^/   • /' "$GAPFILE"; else printf '   • keine — alle Quellen haben geliefert\n'; fi
+  } > "$out"
+  printf '%s' "$out"
+}
+
 # ---------------------------------------------------------------- Transport
 
 TRANSPORT_FAIL=0
@@ -512,6 +740,11 @@ append_vault() {
   if [ "$MODE" = "gate-batch" ]; then
     local nb=0; [ -f "$TMP/blocked.json" ] && nb="$(jq -r 'length' "$TMP/blocked.json")"
     kern="$nb offene blocked-munir, Top-3 vorgekaut"
+  elif [ "$MODE" = "wochen-review" ]; then
+    local nc="?" nb="?"
+    [ -f "$TMP/closed.json" ]  && nc="$(jq -r 'length' "$TMP/closed.json")"
+    [ -f "$TMP/blocked.json" ] && nb="$(jq -r 'length' "$TMP/blocked.json")"
+    kern="$WEEK_LABEL — $nc Issues geschlossen, $nb blocked-munir offen"
   else
     local nb="?" ready="?"
     [ -f "$TMP/blocked.json" ] && nb="$(jq -r 'length' "$TMP/blocked.json")"
@@ -544,6 +777,25 @@ case "$MODE" in
     collect_blocked
     BRIEF="$(render_gate_batch)"
     CH="${BUZZ_CHANNEL:-$CH_GATES}"; LABEL="🔐 Gate-Batch"
+    ;;
+  wochen-review)
+    PREV_WEEK=""
+    collect_lagebild "backlog,pay"
+    collect_blocked
+    collect_closed
+    collect_fillers
+    # Ein fehlendes fillers.json würde `jq --slurpfile` hart abbrechen und den
+    # ganzen Vorschlagsblock mitreißen — inklusive der P1-money-Zeilen, die
+    # schon da sind. Die Lücke ist oben benannt; hier zählt nur, dass der
+    # Ausfall lokal bleibt.
+    [ -f "$TMP/fillers.json" ] || echo '[]' > "$TMP/fillers.json"
+    # Reihenfolge ist bindend: erst die Vorwoche LESEN, dann diese Woche
+    # SCHREIBEN — sonst überschreibt der Lauf seine eigene Vergleichsbasis,
+    # sobald zweimal in derselben ISO-Woche gelaufen wird.
+    load_prev_snapshot || true
+    write_snapshot || true
+    BRIEF="$(render_wochen_review)"
+    CH="${BUZZ_CHANNEL:-$CH_GENERAL}"; LABEL="📊 Wochen-Review"
     ;;
 esac
 
