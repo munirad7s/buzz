@@ -362,3 +362,49 @@ export BUZZ_RELAY_URL="https://adaswin.communities.buzz.xyz"                    
 - Der CLI-Default ist `http://localhost:3000` — wer den nicht überschreibt, hält den Relay fälschlich für tot.
 - Agenten antworten nur auf **Mentions** und nur ihrem Owner (`respond_to=owner-only`) → Munirs Key ist Pflicht, `--mention <pubkey>` sicherer als reiner `@Name`-Text.
 - Agent-Pubkeys + Kanal-Abos: `%APPDATA%/xyz.block.buzz.app/agents/managed-agents.json` bzw. `agents/logs/<pubkey>__*.log` (`subscribed to channel …`). Ein Agent hört nur in Channels, in denen er Mitglied ist.
+
+## Eigener Relay auf adas-hetzner (buzz#2 — Datenhoheit + 24/7-Scheduler)
+
+**Entschieden: eigener Compose-Stack unter `/opt/buzz` hinter dem bestehenden coolify-proxy**, statt Caddy-Override aus `deploy/compose/compose.caddy.yml`. Begründung: adas-hetzner hat bereits genau einen TLS-Terminator (Traefik v3.6, Ports 80/443 belegt); ein zweiter Caddy hätte die Ports gar nicht bekommen. Der Upstream-Caddy-Override ist deshalb nicht anwendbar — Traefik-Labels ersetzen ihn.
+
+- Öffentlich: `https://buzz.adas.casa` (HTTP→HTTPS-Redirect, Let's-Encrypt-HTTP-Challenge über den `letsencrypt`-Resolver).
+- Repo-Kopie des Stacks: `.empire/deploy/hetzner/compose.yml` (secret-frei). Live: `/opt/buzz/compose.yml`.
+- Secrets: `/opt/buzz/` (chmod 600) + Spiegel in `~/.secrets/buzz-relay.env`. Nie im Repo — der Fork ist public.
+- Modus: geschlossener Relay (`BUZZ_REQUIRE_AUTH_TOKEN` + `BUZZ_REQUIRE_RELAY_MEMBERSHIP`). Owner-Keypair ist bootstrapped, Community wird beim ersten Start automatisch für den Host angelegt.
+- Umzugsplan der gehosteten Community: `.empire/RELAY-MIGRATION.md`. Die Block-gehostete Community läuft unangetastet weiter.
+
+### Server-Konventionen, die hier hart gelten
+
+| Falle | Regel |
+|---|---|
+| Traefik wählt bei mehrfach vernetzten Containern die Backend-IP zufällig | `traefik.docker.network=coolify` als Label — ohne das: 504-Roulette |
+| Compose zwingt den Service-Namen als Netzwerk-Alias auf | alles `buzz-*` präfixiert; ein generisches `postgres` am `coolify`-Netz kollidiert mit Fremd-Stacks |
+| `pg_isready` lügt während der Postgres-Entrypoint-Init | vor DB-Arbeit auf `init process complete` **im Log** warten, nicht auf den Healthcheck |
+| adas.casa-DNS: die Spaceship-UI friert ein | Records nur über die Spaceship-API (`PUT /api/v1/dns/records/adas.casa`, Creds `~/.secrets/spaceship-api.env`) |
+| Nur der Relay darf ans externe Netz | DB/Cache/S3 bleiben auf dem privaten `buzz-internal`-Netz, keine Host-Ports |
+
+### Client-Protokoll (gemessen, nicht geraten)
+
+Die REST-Bridge ist der bequemste Agenten-Weg, der Desktop nutzt WebSocket. Beides verifiziert:
+
+- **REST-Bridge**: `POST /events` (Event einreichen), `POST /query` (lesen). Auth = **NIP-98**: `Authorization: Nostr <base64(kind-27235-Event)>` mit Tags `u` (volle URL), `method`, `payload` (SHA-256 des Bodies), `created_at` ±60 s. `/query` erwartet ein **Array** von Filtern — ein einzelnes Objekt gibt `invalid filters: expected a sequence`.
+- **WebSocket**: `wss://buzz.adas.casa/` → Relay schickt `AUTH <challenge>` → Client antwortet mit kind-22242 (Tags `relay`, `challenge`) → `REQ` abonniert.
+- Kanal anlegen: kind **9007**, Tags `h` (Kanal-UUID, clientseitig gewählt), `name`, optional `visibility`/`channel_type`. Gültige `channel_type`-Werte: `stream` · `forum` · `dm` · `workflow` — **nicht** `standard`.
+- Nachricht: kind **9**, Tag `h`, Content = Text.
+- Workflow: kind **30620**, Tags `d` (Workflow-UUID) + `h` (Kanal-UUID), Content = **YAML**. Ohne `h`-Tag landet der Workflow ohne `channel_id` und der Cron-Tick überspringt ihn still (`skipping schedule workflow with no channel_id`).
+- Workflow-Schema: `trigger.on` ∈ `schedule|message_posted|reaction_added|diff_posted|webhook`; bei `schedule` entweder `cron` (UTC!) **oder** `interval` (`60s`/`30m`/`1h`), nie beides. Steps tragen `action: send_message|send_dm|set_channel_topic|add_reaction|call_webhook`. `call_webhook` verlangt Owner/Admin-Rolle (SEC-006).
+
+### Beweisstand (E2E am laufenden System, 2026-08-01)
+
+| Schritt | Beweis |
+|---|---|
+| Öffentlich erreichbar | `https://buzz.adas.casa/health` → 200 `ok`, gültiges LE-Zertifikat, HTTP→HTTPS 302 |
+| Client-Transport | WSS-Upgrade durch Traefik, NIP-42-AUTH `OK …true`, Subscription liefert die gespeicherte Nachricht |
+| Nachricht rund | kind:9 gesendet (`accepted:true`) und über `/query` zurückgelesen |
+| **24/7-Scheduler** | Interval-Workflow (60 s) feuerte 4× automatisch — 12:17:15, 12:18:15, 12:19:15, 12:20:15 UTC, exakt 60 s Abstand, Autor = **Relay-Key**, nicht der Client |
+| **Detektor kann rot werden** | `channel_type: standard` → 400; nach `enabled: false` kam ~3 min lang kein Tick mehr |
+| Backup | `backup.sh` Block 5e grün; restic-Snapshot `c2e205cb` enthält `pg_buzz.sql.gz` + MinIO- + Git-Volume + Config |
+| Monitoring | Kuma-Monitor `buzz-relay` (keyword `ok`) = UP; alle 15 aktiven HTTP-Monitore nach dem Kuma-Restart weiter grün |
+| Footprint | 4 Container ≈ 200 MB RSS gesamt (Limits 1 g/512 m/256 m/512 m) |
+
+**Nicht erledigt:** Der GUI-Beweis „Desktop-App verbindet sich" steht aus — der Windows-Build gehört buzz#1, und die installierte App mit der produktiven Community wird nicht angefasst. Der Transportweg der App (WSS + NIP-42) ist oben protokollnah bewiesen.
