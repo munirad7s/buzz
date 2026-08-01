@@ -13,3 +13,4 @@
 2026-08-01 15:58 | 1 Ticket | buzz#3 MCP-Grundausstattung (Vault/n8n verdrahtet, Nest-Approval-Loch gefunden+gefixt) | Blocker: Claude-Abo-Kontingent (fable-5[1m]) → Kanal-Beweis offen
 2026-08-01 16:00 | 1 Ticket | #10 Führungsrituale auf echte Daten (ritual.sh + mcp-call.mjs + buzzx.sh; Relay-Scheduler feuert nachweislich nicht -> Windows-Aufgabenplanung) | Gardener: #55/#56/#57 | Blocker: keine
 2026-08-01 16:05 | 1 Ticket | #42 Decision-Drafts (.empire/tools/decision-drafts.sh collect/ask/ingest/list, 10/10 Proben, Live: D-844DC1DE angelegt + TG msg105) | Befund: naives Marker-Grep faengt Backtick-Erwaehnungen -> Format-Filter | Offen: ingest wartet auf Munirs Warum | Blocker: keine
+2026-08-01 16:27 | 1 Ticket | buzz#59 Nest-Doctor (5 Schichten inkl. echtem Handshake + Prozess-Drift; 6 Proben rot/gruen gemessen) | Korrektur zu #3: das Gate ist hasTrustDialogAccepted, nicht enabledMcpjsonServers | Offen: Einhaengung in ritual.sh (#10)
