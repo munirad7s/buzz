@@ -1794,3 +1794,93 @@ Der größte Rauschposten war nicht GitHub, sondern **Munirs eigene Systeme**, d
 ### Kleine additive Erweiterung an `lagebild.sh`
 
 Der Zahlungs-Block liefert zusätzlich ein 24-Stunden-Fenster (`last24_total`, `last24_paid`, `last24_paid_eur`, `last24_failed_after_method`, `last24_paid_methods`, `payments_window_complete`). Grund: der Morgenbrief fragt „was hat sich seit gestern bewegt", nicht „wie war der Monat" — und ohne eigenes Fenster hätte er das aus `last_payments` raten müssen, also aus den letzten DREI Zahlungen. `payments_window_complete` sagt, ob die 50 abgeholten Zahlungen 24 h überhaupt abdecken. Der Morgenbrief ruft `lagebild.sh` jetzt mit `--amounts` auf (privater Kanal); `--redact` nimmt die Beträge wieder heraus.
+
+---
+
+## Der `claude`-Agent erbt Munirs Vollkonfiguration — gemessen, und warum die Trennung (noch) nicht kommt (buzz#84)
+
+**Kurzfassung:** Ja, er erbt alles. Das kostet **17,8 s pro `session/new`** und schleppt **56 MCP-Server**
+mit, 12 davon dauerhaft kaputt. Der Hebel dagegen ist gemessen und wirkt (**2,2 s / 19 Server, 8,1×**) —
+er ist trotzdem **nicht verdrahtet**, weil die Auth dabei auseinanderliefe. Das ist kein Zögern, das ist
+der Guardrail des Tickets: *kein zweiter Auth-Zustand, bevor irgendetwas getrennt wird.*
+
+### Warum er erbt: es steht im Adapter, nicht in Buzz
+
+`@agentclientprotocol/claude-agent-acp@0.64.0` (`dist/acp-agent.js`) baut die SDK-Optionen mit
+
+```js
+const options = { systemPrompt, settingSources: ["user", "project", "local"], ... }
+```
+
+Das ist eine bewusste Opt-in-Entscheidung des Adapters: das Claude Agent SDK lädt **ohne** diese Zeile
+gar keine Filesystem-Settings. Mit ihr bekommt der Agent Munirs kompletten User-Scope — 28 MCP-Server
+aus `~/.claude.json`, 39 Plugins aus `~/.claude/settings.json`, dazu Skills und Hooks. Buzz injiziert
+dabei nichts; der Agent-Record hatte bis heute keine Env-Overrides.
+
+### Messung auf dem echten Agentenpfad
+
+`%APPDATA%\Buzz\node-tools\claude-agent-acp.cmd` direkt über stdio, `initialize` → `session/new`
+(`{cwd: ~/.buzz, mcpServers: []}`), **kein `session/prompt`** — kontingentunabhängig, wie bei buzz#40.
+Server-Zahlen aus `claude mcp list` im selben `cwd` (verbindet jeden Server wirklich, meldet Fehler).
+
+| Messgröße | geerbt (Ist-Zustand) | `CLAUDE_CONFIG_DIR=~/.claude-buzz` |
+|---|---|---|
+| `session/new`, warm, direkt hintereinander | **17 756 ms** | **2 192 ms** |
+| Wall bis nutzbarer Session | 18 789 ms | **2 962 ms** |
+| erste Session nach Ruhe (kalt) | 25 059 ms | — |
+| MCP-Server im `cwd` `~/.buzz` | **56** | **19** |
+| davon kaputt / unauthentifiziert | **12** (u. a. `obsidian`, `magic`, `coolify`, `n8n-mcp`, `spaceship-mcp`, `gbp`, `unreal-mcp`, 2 Plugin-Server) | 4 (nur Account-Connectors) |
+
+Zwei Nebenbefunde aus derselben Messung:
+
+- **Der Nest-`cwd` kostet fast nichts.** Gleiche Bedingungen, `cwd` = leeres Verzeichnis: 10 972 ms.
+  Der Unterschied zu `~/.buzz` sind ~1,7 s für die fünf Nest-Server — die Last liegt praktisch
+  vollständig im User-Scope, nicht im Projekt-Scope.
+- **`enableAllProjectMcpServers: true` in `~/.buzz/.claude/settings.local.json` trägt.** Auch mit einem
+  fremden, schlanken Config-Dir verbinden sich alle fünf Nest-Server (`google-mcp`, `telegram-mcp`,
+  `espo-mcp`, `obsidian-mcp-tools`, `n8n-api`) sauber. Die Dispatcher-Ausstattung aus buzz#4 hängt
+  nicht am User-Scope.
+- **Scope-Konflikt gemeldet:** `n8n-api` ist in `user` und `project` mit verschiedenen Endpunkten
+  definiert; OAuth-Token werden pro Endpunkt gespeichert.
+
+### Warum `CLAUDE_CONFIG_DIR` trotzdem nicht verdrahtet wird
+
+Bei codex (buzz#40) hielt ein **Hardlink** auf `auth.json` beide Seiten auf einem Token. Für Claude Code
+gilt das **nicht** — zweimal reproduziert:
+
+```
+# frisch verlinkt
+inode=4503599632054867 links=2 ~/.claude/.credentials.json
+inode=4503599632054867 links=2 ~/.claude-buzz/.credentials.json
+# EIN claude-Aufruf spaeter
+inode=6755399445748017 links=1 ~/.claude/.credentials.json     <- neue Datei
+inode=4503599632054867 links=1 ~/.claude-buzz/.credentials.json <- alter Stand, eingefroren
+```
+
+Claude Code **ersetzt** die Credentials-Datei (neu schreiben + umbenennen) statt sie zu überschreiben.
+Ein Hardlink zeigt auf den Inode, nicht auf den Pfad — er überlebt das Umbenennen nicht und zerfällt
+lautlos in zwei Dateien. Danach refresht jede Seite ihr eigenes Token auf demselben Konto: genau der
+zweite Auth-Zustand, den das Ticket verbietet, und ein Kandidat dafür, dass eine Seite die andere
+ausloggt. **Zur Kontrolle nachgemessen:** `~/.codex/auth.json` ↔ `~/.codex-buzz/auth.json` stehen
+weiterhin auf `links=2`, gleicher Inode, inhaltsgleich — die Codex-Engine schreibt **in place**.
+Der Unterschied liegt in der Schreibweise der jeweiligen Engine, nicht im Mechanismus.
+
+Ein **Symlink** (der nach Pfad auflöst und das Ersetzen überlebt) wäre die richtige Form, scheitert hier
+an Windows: `New-Item -ItemType SymbolicLink` → `NewItemSymbolicLinkElevationRequired`. Junctions gibt
+es nur für Verzeichnisse.
+
+**Entscheidung:** Messung steht, Hebel ist belegt, Verdrahtung bleibt aus. Der Agent-Record wurde
+testweise gesetzt und wieder zurückgenommen (`managed-agents.json.bak-buzz84-*` liegt daneben); das
+Experiment-Verzeichnis `~/.claude-buzz` wurde restlos entfernt, damit kein eingefrorenes Token
+herumliegt. Munirs interaktives Setup wurde nicht beschnitten.
+
+### Der Weg, der die Auth gar nicht erst anfasst
+
+Nicht der Config-Dir muss weg, sondern **eine Zeile im Adapter**: wäre `settingSources` konfigurierbar
+(z. B. `["project","local"]` per Env), bliebe der Config-Dir — und damit **ein** Auth-Zustand —
+unangetastet, und die 28 User-Server plus 39 Plugins fielen trotzdem weg. Das ist eine upstream-fähige
+Änderung an `@agentclientprotocol/claude-agent-acp`, kein Buzz-Fork-Feature. Folge-Ticket: buzz#123.
+
+**Merksatz für den nächsten Agenten:** Ein Hardlink teilt einen *Inode*. Wer ihn als „geteilte Datei"
+benutzt, muss vorher wissen, ob der Schreiber in place schreibt oder ersetzt — sonst hat man nach dem
+ersten Schreibvorgang zwei Wahrheiten und merkt es nicht.
