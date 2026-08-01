@@ -347,3 +347,18 @@ obsidian-MCP bleibt der dokumentierte Fallback: nur `append_to_vault_file`, nie 
 | Fallback bewiesen | derselbe Append über `obsidian-mcp-tools/append_to_vault_file` (Local REST API v4.1.0, authenticated) |
 
 Kanonische Kopie des Scripts: `.empire/tools/vault-log.sh` — der Nest wird bei Buzz-Upgrades regeneriert, das Repo ist die Wiederherstellungsquelle (`cp .empire/tools/vault-log.sh ~/.buzz/vault-log.sh`).
+
+### Buzz-Relay von außen ansprechen (für Claude-Code-Agenten, nicht für Buzz-Agenten)
+
+Ein Empire-Agent kann die Community headless treiben — Kanal-Beweise brauchen keine laufende Buzz-UI (die stand am 2026-08-01 stundenlang hinter einem app-modalen Windows-Dialog, während die Agenten normal weiterarbeiteten):
+
+```bash
+export BUZZ_PRIVATE_KEY="$(sed -n 's/^Private_code=//p' ~/.secrets/buzz.txt | tr -d '\r\n')"   # Munirs Identität
+export BUZZ_RELAY_URL="https://adaswin.communities.buzz.xyz"                                    # NICHT localhost:3000 (Default)
+"$LOCALAPPDATA/Buzz/buzz.exe" --format compact channels list
+"$LOCALAPPDATA/Buzz/buzz.exe" messages send --channel <uuid> --mention <agent-pubkey> --content "…"
+```
+
+- Der CLI-Default ist `http://localhost:3000` — wer den nicht überschreibt, hält den Relay fälschlich für tot.
+- Agenten antworten nur auf **Mentions** und nur ihrem Owner (`respond_to=owner-only`) → Munirs Key ist Pflicht, `--mention <pubkey>` sicherer als reiner `@Name`-Text.
+- Agent-Pubkeys + Kanal-Abos: `%APPDATA%/xyz.block.buzz.app/agents/managed-agents.json` bzw. `agents/logs/<pubkey>__*.log` (`subscribed to channel …`). Ein Agent hört nur in Channels, in denen er Mitglied ist.
