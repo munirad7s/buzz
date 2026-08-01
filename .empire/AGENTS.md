@@ -757,6 +757,39 @@ Ein naives `grep "⚖️ Decision-Kandidat:"` fängt **jede Zeile, die den Marke
 
 **Offen:** Der letzte Schritt (`ingest` mit Munirs echter Antwort) steht aus — er hängt an ihm, nicht am Code. Sobald er antwortet: `bash .empire/tools/decision-drafts.sh ingest`.
 
+## Nest-Doctor: was die Agenten wirklich in der Hand haben (buzz#59)
+
+`.empire/tools/nest-doctor.sh` — die Rot-Probe für die Werkzeugschicht, entstanden direkt aus dem Befund in buzz#3 (drei Tickets galten als erledigt, das Werkzeug fehlte trotzdem, ohne jede Fehlermeldung).
+
+**Korrektur zu buzz#3:** Der Schalter ist nicht `enabledMcpjsonServers`, sondern **`hasTrustDialogAccepted`**. Gemessen als Rot-Probe am laufenden System: `enabledMcpjsonServers` wurde zwischenzeitlich von einer parallelen Session auf `null` zurückgesetzt — die Server blieben trotzdem `✔ Connected`. Danach `hasTrustDialogAccepted: false` gesetzt: **sofort wieder „⏸ Pending approval"**, mit `true` sofort wieder grün. Ein Projekt ohne Eintrag in `~/.claude.json` ist ungetraut, und für ein ungetrautes Projekt ignoriert Claude Code die `.mcp.json` komplett — deshalb war die Nest-Verdrahtung aus #4/#5/#6 wirkungslos. `enableAllProjectMcpServers: true` in `~/.buzz/.claude/settings*.json` wirkt **nur zusätzlich zum Trust**, nie allein. Die Allowlist bleibt als Absicherung stehen, ist aber nicht das Gate.
+
+Fünf Schichten, jede kann rot werden: Repo-Kanon (`nest-mcp.json`) · `~/.buzz/.mcp.json` · Freigabe (Trust + enableAll/Allowlist, minus `disabledMcpjsonServers`) · **echter stdio-Handshake je Server** (`initialize` + `tools/list`, Tool-Zahl) · **Prozess-Drift** (mtime `.mcp.json` vs. ältester `buzz-acp`-Start).
+
+```bash
+bash .empire/tools/nest-doctor.sh              # Tabelle
+bash .empire/tools/nest-doctor.sh --format json
+```
+
+Exit-Codes beantworten nur die **Erhebung**: `0` alle Schichten deckungsgleich · `1` Drift · `2` Erhebung tot. **Exit 0 heißt nicht „alles gut", sondern „alle fünf Schichten sagen dasselbe".**
+
+### Gemessene Proben (2026-08-01)
+
+| Probe | Ergebnis |
+|---|---|
+| Soll-Zustand | 5 Server, Handshake-Toolzahlen `espo 6 · google 27 · n8n 24 · obsidian 18 · telegram 3`, Exit 0 |
+| **Projekt ungetraut** (`hasTrustDialogAccepted: false`) | jeder Server „NICHT FREIGEGEBEN" — **obwohl der Handshake weiter 6 Tools liefert**. Genau der stille Fehlermodus aus #3: Server läuft, Agent hat ihn nicht. Exit 1 |
+| Server mit totem Kommando | `FEHLER:spawn-ENOENT`, Exit 1 |
+| Prozess-Drift | am echten Nest live rot („Agenten laufen mit dem ALTEN Werkzeugkasten"), an einer Kopie mit alter mtime grün |
+| Nest unlesbar | `FEHLER — … nicht lesbar`, Exit 2 |
+| `--format json` | valides JSON mit `exit`, `process_drift`, `trust_accepted`, `servers[]` |
+
+### Windows-Falle, die das Ticket zweimal gekostet hat
+
+Ein **mehrzeiliges** `node -e '…'` führt in dieser Umgebung (Git Bash + Volta-Shim) **gar nichts** aus: keine Ausgabe, kein Fehler, Exit 0. Einzeilige `-e`-Programme laufen normal. Der Handshake liegt deshalb als eigene Datei `.empire/tools/mcp-handshake.js` vor. Wer hier ein `node -e` über mehrere Zeilen einbaut, baut eine stille Null.
+
+Zweite Falle derselben Klasse: `console.log` unmittelbar vor `process.exit(0)` verliert unter Windows die Ausgabe, wenn stdout eine Pipe ist — der Handshake schreibt deshalb mit `fs.writeSync(1, …)`.
+
+**Offen (bewusst nicht gemacht):** die Einhängung in den Morgenbrief (`.empire/tools/ritual.sh`, buzz#10). Das Script war beim Bau dieses Tickets gerade frisch gemerged und gehört einem parallel laufenden Agenten — ein Eingriff hätte einen Konflikt in einer 473-Zeilen-Datei riskiert, die hier niemand verifizieren konnte. Der Hook ist ein Dreizeiler: `bash "$HERE/nest-doctor.sh" --format json` einsammeln, bei `exit != 0` eine Zeile „Werkzeugbestand driftet" in den Lage-Block schreiben.
 ### Workflow-Quellen (Export 2026-08-01, Kanal `#general` `96067fa5-…`)
 
 Beide Workflows sind editiert, nicht dupliziert (`workflows delete` wird angenommen, löscht aber nicht — Neutralisieren geht nur über `enabled: false`). Owner ist der Agent-Pubkey `78be5e27…`; NIP-33-Ersetzung funktioniert nur mit demselben Schlüssel, deshalb muss `buzzx.sh --key agent:<pubkey>` verwendet werden.
