@@ -1401,3 +1401,60 @@ Reihenfolge im Ablauf ist bindend: **erst die Vorwoche lesen, dann diese Woche s
 | Echter Lauf, drei Transporte | Kanal `#general` (Event `cf7285c0112e5e4c`), Telegram `message_id 114`, Tagesnotiz-Zeile |
 
 **Befund fürs Lagebild, nicht fürs Ritual:** owner-weit existiert genau **ein** offenes `ready`-P1-money. Ein Vorschlagsblock, der deshalb einzeilig bleibt, sieht aus wie ein Fehler — er wird sichtbar mit den ältesten `ready`-P1 aufgefüllt und die Herkunft je Zeile benannt (`[💶P1-money]` / `[P1]`). Aufgefüllt wird nur, nie ersetzt.
+
+---
+
+## buzz-acp-Testsuite auf Windows (buzz#83) — drei Ursachen, keine davon ein Produktionsfehler
+
+Ausgangslage: `cargo nextest run -p buzz-acp --no-fail-fast` → **9 rote Tests**, dauerhaft. Eine Suite, die immer rot ist, beweist nichts mehr — jeder Rust-Ticket-Agent musste vorher per `git stash` gegenmessen, ob *seine* Änderung die Ursache war.
+
+### Ursache 1 — `bash` ist auf Windows die WSL-Bash (7 der 9 Tests)
+
+Die Fixtures spawnen den **bloßen Namen** `"bash"`. Der wird über den **Windows**-`PATH` aufgelöst, und dort gewinnt `C:\Windows\System32\bash.exe` — der WSL-Starter — gegen Git Bash, **auch wenn der Testlauf selbst aus Git Bash kommt**. WSL führt das Script in der Distro aus und reicht die anonyme Pipe des Elternprozesses nie durch: jedes `read` bekommt sofort EOF, das Script antwortet nicht, der Client meldet `AgentExited`.
+
+Bewiesen, nicht vermutet — `uname -sr` aus dem Fixture heraus:
+
+```
+DIAG start uname=[Linux 6.6.87.2-microsoft-standard-WSL2] pwd=[/mnt/c/...]
+DIAG read1 rc=1 len=0
+```
+
+Fix: `test_shell()` löst deterministisch auf — `BUZZ_TEST_BASH` → Git-Bash-`EXEPATH` → bekannte Installationspfade. **Kein Fallback auf `"bash"`**: das wäre wieder WSL, und ein fehlender Toolchain-Fund soll als klarer Panic auffallen statt als rätselhaftes `AgentExited`.
+
+> Dieselbe Falle steckt latent in `crates/buzz-relay/src/api/git/policy.rs` und `crates/buzz-acp/src/pool.rs` — dort laufen die Scripts heute nur als `sleep 10`, brauchen also kein stdin und überleben WSL zufällig. Wer dort ein `read` ergänzt, fällt sofort hinein.
+
+### Ursache 2 — `Path::display()` in einem Shell-Script (die Müll-Dateien im Repo)
+
+`spawn_steer_capture_script` interpolierte den Capture-Pfad **unquoted** ins Script. Auf Windows liefert `display()` `C:\Users\…`, bash frisst die Backslashes als Escapes und schreibt eine Datei namens `C:UsersrescueAppDataLocalTemp…json` — ins **aktuelle Verzeichnis**, und das ist unter `cargo test` das Crate-Root. Genau daher kamen die fünf Fremdkörper in `crates/buzz-acp/`.
+
+Fix: `script_path()` (Backslash → Slash) plus einfache Anführungszeichen im Script. Danach landen die Captures wieder in `%TEMP%\buzz-acp-steer-capture\` und `git status` bleibt nach dem Lauf sauber.
+
+### Ursache 3 — Zeitfenster, die kleiner sind als der Windows-Prozess-Start
+
+`idle_resets_on_stdout_activity` und `keepalive_resets_idle_past_deadline` messen Idle-Fenster von 200 ms bzw. 100 ms, während ein echter Shell-Prozess die Zeilen liefert. Auf Windows ist **jedes `sleep` im Fixture ein Prozess-Start**. Gemessen während eines vollen 697-Test-Laufs: Abstand zweier Fixture-Zeilen **107 ms im Mittel, 194 ms im schlechtesten Fall** für ein nominelles `sleep 0.05` — die alten Fenster lagen *innerhalb* dieser Streuung. Deshalb liefen die Tests einzeln grün und unter Last rot.
+
+Drei Maßnahmen, jede mit Begründung:
+1. `spawn_script_ready()` — das Fixture sendet einen Ready-Marker, der Test startet seine Uhr erst danach. Vorher maß er den Shell-Start mit.
+2. `IDLE_WINDOW = 800 ms` (~4× über dem gemessenen Worst Case) und `$(seq …)` → `for ((…))`, das spart einen Prozess-Start je Test.
+3. `.config/nextest.toml`: `retries = 3` für die wanduhr-abhängigen Tests.
+
+**Zwei gemessene Sackgassen, damit sie niemand nochmal geht:**
+- *Fenster einfach weit genug aufziehen* nimmt den Tests die Fähigkeit, für eine echte Regression rot zu werden — die Zusicherung beweist dann nur noch, dass die Maschine nicht brennt.
+- *`threads-required = "num-test-threads"`* (Tests allein laufen lassen) machte es **schlimmer**: Suite-Laufzeit 18 s → 110 s und mehr Fehlschläge, weil sich die exklusiven Tests vorn stapeln und ihre `sleep 10`-Ausläufer den Lauf dominieren.
+
+Retries passen zu dem, was das ist: ein Scheduling-Artefakt, kein Defekt. Ein Test, der in irgendeinem Versuch grün wird, war ausgehungert; eine echte Regression fällt in allen vier Versuchen um.
+
+### ⚠️ Neue Worktree-Falle: geteiltes `CARGO_TARGET_DIR` serviert alte Binaries
+
+Um den Kompilier-Aufwand zu sparen, lief die Verifikation zuerst mit `CARGO_TARGET_DIR` auf das `target/` des Haupt-Checkouts. Zwei Läufe waren grün, der dritte meldete plötzlich **676 statt 697 Tests**, exakt die Fehler von *vor* dem Fix und die längst reparierten Müll-Dateien wieder im Baum: cargo hatte ein Artefakt des Haupt-Checkouts wiederverwendet. **Ein Worktree bekommt sein eigenes Target-Verzeichnis** — sonst misst man irgendwann den Stand eines anderen Branches und hält ihn für den eigenen.
+
+### Beweisstand (2026-08-01)
+
+| Prüfung | Ergebnis |
+|---|---|
+| Ausgangslage `cargo nextest run -p buzz-acp --no-fail-fast` | 697 Tests, **9 failed** |
+| Nach Ursache 1 + 2 | **2 failed** (nur noch die Zeitfenster) |
+| Nach Ursache 3, eigenes Target-Verzeichnis | **697 passed, 0 failed** |
+| Wiederholbarkeit | drei aufeinanderfolgende Läufe grün (`1 flaky` = Retry gegriffen, kein Fehlschlag) |
+| `git status --short` nach dem Lauf | keine neuen untracked Dateien |
+| Rot-Probe | Fixture-Antwort verfälscht → **genau** der zugehörige Test rot, Rest grün |
