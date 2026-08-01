@@ -1297,3 +1297,57 @@ Der Ausfall ist nicht theoretisch: `espo-mcp` behielt 97 Paket-Ordner, aber `nod
 - Im Worktree ein eigenes `npm install` fahren. Es kostet Sekunden, die Reparatur kostet mehr.
 - Muss es doch eine Junction sein: **vor** dem Entfernen des Worktrees `cmd /c rmdir <worktree>\node_modules` (das *entfernt die Verknüpfung*, ohne dem Ziel zu folgen) — erst danach `git worktree remove`.
 - Nach dem Abräumen eines Worktrees die betroffenen Live-Server einmal wirklich ansprechen (`mcp-call.mjs --server <name> --list`), nicht nur `git status` lesen. Ein grüner Merge sagt nichts über einen laufenden Server.
+## Mehrere MCP-Server je buzz-agent (buzz#8 — `BUZZ_ACP_MCP_SERVERS`)
+
+**Entschieden: Weg (A), das kleine additive Fork-Feature in buzz-acp** — nicht der Multiplexer-Workaround (B). Begründung: ein Multiplexer wäre ein viertes Binary im Betrieb, das Namensräume, Fehlerbilder und Neustarts eigener Downstream-Server selbst verwalten müsste — Logik, die `buzz-agent` bereits hat (16 Server, Restart-Backoff, Tool-Registry). (A) ist ~120 Zeilen, rein additiv und upstream-anbietbar; (B) wäre dauerhafter Eigenbetrieb.
+
+Der Engpass saß nie in buzz-agent: das kann seit jeher 16 stdio-Server (`crates/buzz-agent/src/mcp.rs`, `MAX_MCP_SERVERS`). Es war **buzz-acp**, das genau einen injizierte (`BUZZ_ACP_MCP_COMMAND`). Damit war jeder buzz-agent-native Agent auf ein Werkzeug-Set festgelegt, und tool-reiche Rollen mussten auf die teuren Harnesses (Claude/Codex) ausweichen.
+
+```bash
+BUZZ_ACP_MCP_COMMAND=…/buzz-dev-mcp.exe \
+BUZZ_ACP_MCP_SERVERS='[{"name":"vault","command":"…/mcp-server.exe","env":{"OBSIDIAN_API_KEY":"…"}}]' \
+  buzz-acp --agent-command …/buzz-agent.exe
+```
+
+`name` ist optional (Default: File-Stem des Kommandos), nur `command` ist Pflicht. Volle Feldtabelle: `crates/buzz-acp/README.md`, Abschnitt „Multiple MCP servers".
+
+### Die Sicherheitsgrenze, die das Feature erst betriebstauglich macht
+
+**Zusatz-Server bekommen ausschließlich das `env`, das sie selbst deklarieren.** Kein `BUZZ_RELAY_URL`, kein `BUZZ_PRIVATE_KEY`, kein `BUZZ_AUTH_TAG`.
+
+Das ist keine Vorsicht, sondern Notwendigkeit: `--mcp-command` ist das **eigene** dev-mcp des Agenten und spricht mit dem Relay *als* der Agent — deshalb bekommt es den Secret Key. Ein beliebiger Fremd-Server (Vault-Leser, CRM-Client) hat diese Rolle nicht. Erbte er den Key, könnte jeder davon im Namen des Agenten posten. Dasselbe Muster wie das fehlende Send-Tool bei Gmail und das fehlende Update-Tool bei Espo: **die Schnittstelle ist der Guardrail.**
+
+Der Beweis dafür fiel als Nebenprodukt an (s. Tabelle, Probe 5): der Vault-Server startete zuerst **nicht** — `OBSIDIAN_API_KEY environment variable is required`. Genau richtig: er hatte kein deklariertes `env`, also auch keinen Zugriff auf das Prozess-Environment. Mit dem Key im Spec-`env` lief er.
+
+### Fail-closed am Prozessstart, nicht in der Session
+
+Ein unbrauchbarer Wert killt buzz-acp beim Start (`configuration error: invalid BUZZ_ACP_MCP_SERVERS: …`), bevor irgendeine Session existiert. Fehlermeldungen zitieren den Wert **nie** — er enthält die API-Keys der Zusatz-Server; die Startzeile loggt nur `extra_mcp=[<namen>]`.
+
+| Regel | Warum sie hart ist |
+|---|---|
+| Reihenfolge fix: `--mcp-command` bleibt Element 0 | Bestandsdeployments meinen „der MCP-Server" = Element 0 |
+| 16 Server gesamt | darüber lehnt buzz-agent die Session ab — hier stirbt stattdessen der Prozess, mit der Zahl im Text |
+| Namen eindeutig, auch gegen den Primary | buzz-agent adressiert Tools über den Servernamen; eine Kollision **überschattet** Tools lautlos |
+| Unbekannte Felder → Fehler | ein vertipptes `envs` würde sonst stillschweigend verworfen |
+
+### Beweisstand (2026-08-01 — echtes Binary, echter Relay `wss://buzz.adas.casa`)
+
+Der Beweis läuft über einen mitschreibenden ACP-Agenten (Recorder) und über den **echten** `buzz-agent.exe`. Sessions entstehen erst pro Turn — ein `--heartbeat-interval 10` erzwingt einen, ohne dass jemand im Kanal schreiben muss.
+
+| # | Probe | Ergebnis |
+|---|---|---|
+| 1 | 2 Zusatz-Server, `session/new` mitgeschrieben | 3 Server auf der Leitung: `[0] buzz-dev-mcp` (mit `BUZZ_RELAY_URL`+`BUZZ_PRIVATE_KEY`) · `[1] vault` (Name explizit, `env` leer) · `[2] espo-mcp` (Name aus dem File-Stem, `args` + eigenes `env` durchgereicht) |
+| 2 | **Regression 0** — dieselbe Konfiguration ohne die neue Env | exakt 1 Server, `buzz-dev-mcp`, unveränderte Env-Liste |
+| 3 | **Fail-closed** — `{"command":"x","envs":{…}}` | Exit 1, `unknown field 'envs', expected one of name, command, args, env`, **keine** Session mitgeschrieben |
+| 4 | **Cap** — 16 Extras neben dem Primary | Exit 1, „17 servers configured (1 from --mcp-command, 16 from this list) — the limit is 16" |
+| 5 | **Echter `buzz-agent.exe`, 2 Server** | beide Server initialisiert und im selben Prozess sichtbar: `server_info: name: "buzz-dev-mcp"` **und** `name: "obsidian-mcp-tools"` |
+| 6 | **Sicherheitsgrenze rot** | ohne `env` im Spec: `error: OBSIDIAN_API_KEY environment variable is required` → der Zusatz-Server sieht das Prozess-Environment nachweislich **nicht** |
+| 7 | Unit-Tests | `cargo test -p buzz-acp`: 674 passed (Baseline 658 + 16 neue), **dieselben** 9 vorbestehenden Windows-Fixture-Fehler wie ohne die Änderung (per `git stash` gegengeprüft) |
+
+### Betriebs-Fallen, die dabei gemessen wurden
+
+- **`--agent-command bash` startet unter Windows die WSL-Bash**, nicht Git Bash: `/bin/bash: C:/Users/…: No such file or directory`. Für Shell-Agenten den vollen Pfad `C:/Program Files/Git/bin/bash.exe` angeben.
+- **Der installierte `buzz-agent.exe` (0.5.x) kennt `BUZZ_AGENT_PROVIDER=openrouter` nicht** (`not supported`), obwohl die Source-README ihn führt. Weg über den OpenAI-kompatiblen Dialekt: `BUZZ_AGENT_PROVIDER=openai` + `OPENAI_COMPAT_BASE_URL=https://openrouter.ai/api/v1` + `OPENAI_COMPAT_API=chat`.
+- **OpenRouter-`:free`-Slugs verfallen.** `deepseek/deepseek-chat-v3-0324:free` antwortet mit 404 und nennt den kostenpflichtigen Slug als Ersatz. Die aktuelle Free-Liste mit Tool-Support kommt aus `/api/v1/models` (`select(.id|endswith(":free")) | select(.supported_parameters|index("tools"))`).
+- **`--heartbeat-interval` muss 0 oder ≥ 10 Sekunden sein** — kleinere Werte sind ein Startfehler.
+- **buzz-acp-Tests verschmutzen den Repo-Baum:** die `steer-capture`-Tests schreiben unter Windows Dateien wie `crates/buzz-acp/C:UsersrescueAppData…json` ins Arbeitsverzeichnis (Pfad-Mangling). Vor dem Commit `git status` prüfen und **nie** `git add -A` nach einem Testlauf.
