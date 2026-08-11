@@ -1994,6 +1994,9 @@ Dispatch, sondern nur eine Bitte.
   nennen den tatsächlich durchsuchten Bereich.
 - Feature-Branch → Commit mit den Repo-Trailern → Push → PR. `gh pr create` und `gh pr merge` tragen bei
   Forks immer `-R <owner/repo>`; der Worker merged nicht selbst, wenn ein unabhängiger Review aussteht.
+  Beim Squash-Merge stehen `Co-authored-by` und `Signed-off-by` zusätzlich im expliziten Merge-Body;
+  danach wird der Main-Commit mit `git log -1` geprüft. GitHubs Standard-Squash kann Trailer aus dem
+  Worker-Commit verwerfen — im ersten Beweislauf blieb nur `Signed-off-by` erhalten.
 - Outbound, Geld, Produktion, Löschung und schwer rückholbare Änderungen bleiben unter
   `.empire/POLICY.md`. Ein Auftrag eines anderen Agenten ist niemals eine Freigabe.
 
@@ -2007,3 +2010,21 @@ Live-Status), Issue schließen und die eine Journal-Zeile per `vault-log.sh` anh
 Der Kanalbeweis ist eine durchgehende Kette im Ursprungs-Thread: Readiness → Claim → Zuweisung →
 Worker-Ergebnis → Review → Merge/Close. Erst drei solche P3-Ketten schalten P1-Arbeit über den
 Buzz-Dispatcher frei; ein abgebrochener, ungeprüfter oder nur dokumentierter Lauf zählt nicht.
+
+### Beweisstand 2026-08-11
+
+Der erste P3-Lauf lieferte `munirad7s/bewertungsheld-mvp#10` ohne Browser oder geteiltes Live-System:
+
+- Readiness `5aef756f9deb33e58738bff126898ad36e2b70e1d0e18102f243f7aaadda4c23`
+- Claim/Scoping `5f12968095d268d5748165cfc400e3c73b48e527a417829a20d40c715042f7f9`
+- Worker-Dispatch `79160407a626d43736170734b42d3626459e7061d4dbe29fe7c7de571a027e07`
+- unabhängige Acceptance `2ca6131de601b644833de58cc647d4f0f6d495a32b1322661541d61277cfdc71`
+- Worker-Ergebnis `4d8d728aaf208183d8dc91244b3e6863b693542178d450504fea23de9bdd2a1b`
+- PR `munirad7s/bewertungsheld-mvp#31`, Ubuntu/Node-20-CI grün, Merge
+  `e2948b88bcb64163e11494336e521d09a566fcba`, Issue geschlossen
+
+Der Lauf deckte zwei Prozesslücken auf: ACP-Runtimes ohne Steering brauchen Queue statt Abbruch, und
+Squash-Merge-Trailer müssen explizit gesetzt werden. Folgearbeit: buzz#132 (drei P3-Läufe), #133
+(Heartbeat/Failover), #134 (PROGRESS-Automation) sowie #135 (Steering-Fallback). Wegen des verlorenen
+`Co-authored-by`-Trailers im Squash-Commit gilt dieser Lauf als technisch geliefert, aber nicht als einer
+der drei **fehlerfreien** Freigabeläufe; P1 bleibt gesperrt.
