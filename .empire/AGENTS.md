@@ -2028,3 +2028,26 @@ Squash-Merge-Trailer müssen explizit gesetzt werden. Folgearbeit: buzz#132 (dre
 (Heartbeat/Failover), #134 (PROGRESS-Automation) sowie #135 (Steering-Fallback). Wegen des verlorenen
 `Co-authored-by`-Trailers im Squash-Commit gilt dieser Lauf als technisch geliefert, aber nicht als einer
 der drei **fehlerfreien** Freigabeläufe; P1 bleibt gesperrt.
+
+## EspoCRM: dormant password users (buzz#70)
+
+`sofia` is not an API consumer. The measured history is one password login two minutes after account
+creation on 2026-06-12, then no further login, no active auth token, no attributed CRM record, and no
+credential consumer in container configuration or cron. The account is intentionally kept active but
+is now `regular` with exactly one explicit deny-all role, `sofia-dormant (deny-all, buzz#70)`.
+
+The guard source lives in `munirad7s/espo-mcp`: `acl/sofia.json` plus the fixed server command
+`/usr/local/sbin/espo-sofia-account-state`. n8n may reach that command only through a dedicated
+forced-command SSH key (`restrict`, no forwarding/PTY); the workflow never receives an Espo admin
+password. A healthy `[BUZZ-28] espo-acl-drift` run reports four users, including `OK sofia`.
+
+Rollback is account-state restoration, not role removal:
+
+```powershell
+$env:ESPO_ADMIN_PW = (& ssh hetzner 'docker exec agency-crm-espocrm printenv ESPOCRM_ADMIN_PASSWORD')
+node tools/apply-sofia-dormant-role.mjs --rollback
+Remove-Item Env:ESPO_ADMIN_PW
+```
+
+This restores `type: admin` with zero roles. Never remove the deny-all role while leaving the account
+`regular`: a role-less Espo user falls back to broad access.
