@@ -79,8 +79,16 @@ git -C C:/Users/rescue/projects/buzz worktree remove ../buzz-agent-<nr>
 ```bash
 rtk gh issue comment <nr> -R munirad7s/buzz -b "✅ Ergebnis: <was>. Verifiziert: <wie>. Gemerged: <PR>. Live: <ja/nein — was fehlt>"
 rtk gh issue close <nr> -R munirad7s/buzz
+bash .empire/tools/progress-append.sh \
+  --repo munirad7s/buzz \
+  --issue <nr> \
+  --pr <pr-nr> \
+  --worker <worker> \
+  --channel-root <64-hex-kanal-root> \
+  --expected-head <40-hex-pr-head> \
+  --result "<kurzes pruefbares Ergebnis>"
 ```
-Dann: Checkbox in Epic #19 abhaken (Issue-Body-Edit), 1 Zeile an `.empire/PROGRESS.md` (lokal reicht, geht mit dem nächsten PR mit), 1 Zeile an die Vault-Tagesnotiz (`01 Journal/YYYY-MM/YYYY-MM-DD.md`).
+Der PROGRESS-Schritt ist fail-closed: Er darf erst nach verifiziertem Merge und geschlossenem Issue laufen und muss bei Retry idempotent bleiben. Danach: Checkbox in Epic #19 abhaken (Issue-Body-Edit), die erzeugte `.empire/PROGRESS.md`-Zeile mit dem nächsten PR einchecken, 1 Zeile an die Vault-Tagesnotiz (`01 Journal/YYYY-MM/YYYY-MM-DD.md`).
 
 ### Schritt 7 — Backlog-Gardener
 Entdeckte konkrete Folgearbeit → SOFORT als Issue im Ticket-Format v2 (Vorlage: `C:/Users/rescue/projects/adas-empire/MASTER-PROMPT.md`, Abschnitt „Ticket-Format v2"; Abweichung hier: Money-Link darf ein Führungs-Hebel sein) mit Labels `ready` + Prio + `phase-*`. Bodies IMMER via `--body-file` (UTF-8), nie `-b` inline. Kein Beschäftigungstheater: jedes Ticket bringt die Führungszentrale messbar näher.
