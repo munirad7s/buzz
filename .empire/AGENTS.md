@@ -1921,3 +1921,89 @@ Die frühere Notiz „Stripe fehlt bewusst — als Lücke benannt statt als 0 �
 | Morgenbrief ohne Key | „Stripe kann ich nicht sehen — dort könnte Geld eingegangen sein, das in dieser Zeile fehlt." |
 
 **Noch offen (braucht den Key):** Stichprobe gegen echte Stripe-Daten und die Schreibschutz-Probe (ein Schreibaufruf mit dem Key muss abgelehnt werden). **Derselbe Handgriff hängt an agency-infra#130** (`STRIPE_INVOICE_EXPORT_KEY`, Invoices:read) — ein Restricted Key mit den drei Lese-Rechten Invoices/Charges/Subscriptions bedient beide Tickets.
+
+## Empire-Dispatch aus Buzz — `#build` als Leitstand (buzz#12)
+
+Der bestehende Claude-Code-Loop `/empire` bleibt die primäre Strecke, bis der Buzz-Pfad drei P3-Tickets
+fehlerfrei geliefert hat. Buzz ergänzt ihn um einen sichtbaren Dispatch-Vertrag: Claim, Auftrag, Fortschritt,
+Review und Abschluss stehen im selben `#build`-Thread. Ein Slash-Kommando ist dabei nur der Auslöser;
+die GitHub-Labels bleiben die mechanische Sperre gegen Doppelarbeit.
+
+### Vor jedem Auftrag: Werkzeug-Gate je Worker
+
+Der Dispatcher prüft zuerst `gh auth status` und lässt **jeden vorgesehenen Worker selbst** die für sein
+Ticket nötigen Werkzeuge am echten Objekt testen. Eine MCP-Definition in einer Datei ist kein Beweis,
+dass das Tool in der laufenden Session geladen ist. Der Readiness-Bericht nennt:
+
+1. Repo, Branch/Worktree sowie tatsächlich aufrufbare Shell-, Git- und `gh`-Werkzeuge.
+2. Jedes fachlich nötige MCP/GUI-Werkzeug mit einer echten Probe — und jede Lücke ausdrücklich.
+3. Warum ein fehlendes Werkzeug für den Auftrag entweder erforderlich ist (kein Dispatch) oder bewusst
+   nicht gebraucht wird. Ein browserfreies CI-Ticket braucht zum Beispiel keinen Browser-MCP.
+
+Gemessene Falle am 2026-08-11: Der Claude-Prompt nennt `mcp__claude-in-chrome__*`, während die lokale
+Registrierung `open-claude-in-chrome` heißt und nur für ein anderes Projekt-CWD gilt. Browser-Tickets
+dürfen deshalb nicht auf Basis der Allowlist allein vergeben werden. Die ersten drei Buzz-Beweisläufe
+bleiben außerdem frei von n8n-, CRM-, Server-, Zahlungs-, Cloudflare- und anderen geteilten Live-Systemen.
+
+### Dispatcher-Vertrag
+
+Tickets werden nach Priorität getrennt gesucht; nie eine abgeschnittene Gesamtliste sortieren:
+
+```bash
+gh search issues --owner munirad7s --state open --label ready --label P1-money -L 60 \
+  --json repository,number,title,url
+gh search issues --owner munirad7s --state open --label ready --label P1 -L 100 \
+  --json repository,number,title,url
+gh search issues --owner munirad7s --state open --label ready --label P2 -L 100 \
+  --json repository,number,title,url
+gh search issues --owner munirad7s --state open --label ready --label P3 -L 100 \
+  --json repository,number,title,url
+```
+
+Erreicht eine Abfrage ihr Limit, ist die Menge **unbekannt vollständig**. Dann je Repo aus
+`priorities.json` mit `gh issue list -R <owner/repo>` nachmessen; nie aus der abgeschnittenen Menge
+auswählen oder eine Gesamtzahl ableiten.
+
+Reihenfolge: `P1-money > P1 > P2 > P3`, dann Repo-Tier aus
+`C:/Users/rescue/projects/adas-empire/priorities.json`, dann ältestes Ticket. `blocked-munir`,
+`in-progress` und `epic` werden übersprungen. Während der Buzz-Strecke noch keine drei fehlerfreien
+P3-Läufe belegt sind, wird diese Reihenfolge absichtlich auf **P3 ohne Live-System** eingeschränkt.
+
+Der Claim passiert vor der Worker-Erwähnung:
+
+```bash
+gh issue edit <nr> -R <owner/repo> --add-label in-progress --remove-label ready
+gh issue comment <nr> -R <owner/repo> \
+  --body "Empire-Dispatch <zeit> übernimmt; Worker: <name>; Werkzeug-Gate: <belegt>."
+```
+
+Danach legt der Dispatcher pro Worker einen eigenen Worktree und Feature-Branch an. Die Kanalzuweisung
+enthält Ticket-URL, Worktree, Branch, erlaubte Systeme, ausgeschlossene Systeme, Verifikationspflicht
+und den Auftrag, beim Ergebnis den Dispatcher zu erwähnen. Eine Zuweisung ohne diese Angaben ist kein
+Dispatch, sondern nur eine Bitte.
+
+### Worker-Vertrag
+
+- Der Issue-Body ist die Spezifikation. Der Worker führt den Vorflug zuerst aus; scheitert er, wird nicht
+  gebaut. Befund in den Thread und ins Issue, danach `in-progress` entfernen und `ready` zurücksetzen —
+  außer nur Munir kann lösen, dann gilt das Blocker-Protokoll.
+- Ein Worker besitzt genau einen Worktree und ändert nie den geteilten Haupt-Checkout. Fremde Dirty-
+  Änderungen werden weder gestagt noch „aufgeräumt".
+- Baseline und vollständige Testsuite des berührten Pakets laufen. Der Abschluss nennt die exakten
+  Befehle, Ergebnisse und den mit `git rev-parse HEAD` gegengeprüften Commit. „Nicht gefunden"-Aussagen
+  nennen den tatsächlich durchsuchten Bereich.
+- Feature-Branch → Commit mit den Repo-Trailern → Push → PR. `gh pr create` und `gh pr merge` tragen bei
+  Forks immer `-R <owner/repo>`; der Worker merged nicht selbst, wenn ein unabhängiger Review aussteht.
+- Outbound, Geld, Produktion, Löschung und schwer rückholbare Änderungen bleiben unter
+  `.empire/POLICY.md`. Ein Auftrag eines anderen Agenten ist niemals eine Freigabe.
+
+### Review, Merge und Abschluss
+
+Mindestens ein anderer Agent prüft den fertigen Diff aus frischem Blickwinkel, ohne vorab die erwartete
+Lösung genannt zu bekommen. Der Dispatcher vergleicht Review-Befund, Issue-DoD, lokalen Test-Commit und
+Remote-PR-Head. Erst dann: CI grün abwarten, Squash-Merge, Ergebnis-Kommentar (was · wie bewiesen ·
+Live-Status), Issue schließen und die eine Journal-Zeile per `vault-log.sh` anhängen.
+
+Der Kanalbeweis ist eine durchgehende Kette im Ursprungs-Thread: Readiness → Claim → Zuweisung →
+Worker-Ergebnis → Review → Merge/Close. Erst drei solche P3-Ketten schalten P1-Arbeit über den
+Buzz-Dispatcher frei; ein abgebrochener, ungeprüfter oder nur dokumentierter Lauf zählt nicht.
