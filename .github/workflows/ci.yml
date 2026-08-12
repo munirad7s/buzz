@@ -86,6 +86,8 @@ jobs:
         run: scripts/test-mobile-worktree-overrides.sh
       - name: File size ratchet unit tests
         run: node --test scripts/check-file-sizes-core.test.mjs
+      - name: pnpm cache workflow contract
+        run: bash scripts/test-ci-pnpm-cache-contract.sh
 
   rust-lint:
     name: Rust Lint
@@ -175,8 +177,9 @@ jobs:
             wget
       - name: Get pnpm store directory
         id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/resolve-pnpm-cache-path.sh
       - name: Restore pnpm store cache
+        if: steps.pnpm-cache.outputs.available == 'true'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -216,7 +219,7 @@ jobs:
             desktop/test-results
           if-no-files-found: ignore
       - name: Save pnpm store cache
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.pnpm-cache.outputs.available == 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -239,8 +242,9 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/resolve-pnpm-cache-path.sh
       - name: Restore pnpm store cache
+        if: steps.pnpm-cache.outputs.available == 'true'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -408,8 +412,9 @@ jobs:
           done
       - name: Get pnpm store directory
         id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/resolve-pnpm-cache-path.sh
       - name: Restore pnpm store cache
+        if: steps.pnpm-cache.outputs.available == 'true'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -548,7 +553,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Save pnpm store cache
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.pnpm-cache.outputs.available == 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -791,8 +796,9 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/resolve-pnpm-cache-path.sh
       - name: Restore pnpm store cache
+        if: steps.pnpm-cache.outputs.available == 'true'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -805,7 +811,7 @@ jobs:
       - name: Web build
         run: just web-build
       - name: Save pnpm store cache
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.pnpm-cache.outputs.available == 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
