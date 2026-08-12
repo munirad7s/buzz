@@ -9,12 +9,27 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
+
+#[derive(Clone, Default)]
+pub(crate) struct SteeringAvailability(Arc<AtomicBool>);
+
+impl SteeringAvailability {
+    pub(crate) fn is_available(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn set(&self, available: bool) {
+        self.0.store(available, Ordering::Release);
+    }
+}
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -308,6 +323,13 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Shared transport availability for the main-loop capability gate.
+    ///
+    /// True while either the initialize handshake advertised
+    /// `_session/steering` or goose/buzz-agent has an active run id. The main
+    /// loop reads a clone before attempting a steer so unsupported runtimes
+    /// leave new events queued instead of entering cancel+merge.
+    steering_availability: SteeringAvailability,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -658,6 +680,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            steering_availability: SteeringAvailability::default(),
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -714,6 +737,7 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.refresh_steering_availability();
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -958,6 +982,15 @@ impl AcpClient {
     /// for the supervisor's post-initialize log line.
     pub fn steering_supported(&self) -> bool {
         self.steering_supported
+    }
+
+    pub(crate) fn steering_availability(&self) -> SteeringAvailability {
+        self.steering_availability.clone()
+    }
+
+    fn refresh_steering_availability(&self) {
+        self.steering_availability
+            .set(self.steering_supported || self.active_run_id.is_some());
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -1490,8 +1523,8 @@ impl AcpClient {
                     //     cross-adapter extension (claude-agent-acp,
                     //     codex-acp), which takes no run id.
                     //   None + !steering_supported → write nothing and ack
-                    //     `ExpectedRunIdMissing`; the main loop maps this to
-                    //     the universal cancel+merge `Steer` fallback.
+                    //     `Unsupported`; the main loop releases the event for
+                    //     normal dispatch after the current turn.
                     //
                     // The capability flag is the ONLY gate on writing
                     // ACP_STEER_METHOD. Probing an unknown method is unsafe:
@@ -1515,13 +1548,12 @@ impl AcpClient {
                     };
                     match selected {
                         None => {
-                            tracing::warn!(
-                                "steer: no active_run_id and agent did not advertise \
-                                 {ACP_STEER_METHOD} — falling back to cancel+merge"
+                            tracing::info!(
+                                steering_available = false,
+                                fallback = "queue_after_turn",
+                                "steer transport became unavailable before write"
                             );
-                            let _ = req.ack_tx.send(crate::pool::SteerAck::Err(
-                                crate::pool::SteerError::ExpectedRunIdMissing,
-                            ));
+                            let _ = req.ack_tx.send(crate::pool::SteerAck::Unsupported);
                         }
                         Some((transport, method, params)) => {
                             let id = self.next_id;
@@ -1896,6 +1928,7 @@ impl AcpClient {
                                 "session_info_update: activeRunId={run_id}"
                             );
                             self.active_run_id = Some(run_id.clone());
+                            self.refresh_steering_availability();
                         }
                         Some(serde_json::Value::Null) => {
                             tracing::debug!(
@@ -1903,6 +1936,7 @@ impl AcpClient {
                                 "session_info_update: activeRunId cleared"
                             );
                             self.active_run_id = None;
+                            self.refresh_steering_availability();
                         }
                         // Missing or non-string/null — leave state untouched.
                         _ => {}
@@ -3675,21 +3709,29 @@ mod tests {
     #[tokio::test]
     async fn active_run_id_sets_on_string() {
         let mut client = spawn_inert_client().await;
+        let availability = client.steering_availability();
         assert!(client.active_run_id().is_none(), "starts as None");
+        assert!(!availability.is_available(), "starts unavailable");
 
         let msg = session_info_update_msg(Some(serde_json::json!("run-abc-123")));
         let _ = client.handle_session_update(&msg);
 
         assert_eq!(client.active_run_id(), Some("run-abc-123"));
+        assert!(
+            availability.is_available(),
+            "an active goose run must expose steering to the main loop"
+        );
     }
 
     #[tokio::test]
     async fn active_run_id_clears_on_null() {
         let mut client = spawn_inert_client().await;
+        let availability = client.steering_availability();
         // Set it first
         let set_msg = session_info_update_msg(Some(serde_json::json!("run-xyz")));
         let _ = client.handle_session_update(&set_msg);
         assert_eq!(client.active_run_id(), Some("run-xyz"));
+        assert!(availability.is_available());
 
         // Then clear with explicit null
         let clear_msg = session_info_update_msg(Some(serde_json::Value::Null));
@@ -3697,6 +3739,10 @@ mod tests {
         assert!(
             client.active_run_id().is_none(),
             "explicit null must clear active_run_id"
+        );
+        assert!(
+            !availability.is_available(),
+            "a runtime without handshake steering must become unavailable when its run clears"
         );
     }
 
@@ -3742,9 +3788,8 @@ mod tests {
     // loop's steer arm, isolated from `AgentPool` / `EventQueue` /
     // dispatch. They prove the locked Option-X contract at the read-loop
     // boundary:
-    //   1. With `active_run_id == None`, the steer arm acks
-    //      `Err(ExpectedRunIdMissing)` and writes nothing — the main
-    //      loop's "Err-before-pending" fallback path is reachable.
+    //   1. With `active_run_id == None`, the steer arm acks `Unsupported`
+    //      and writes nothing, preserving the running turn.
     //   2. With `active_run_id` set, the steer arm writes the JSON-RPC
     //      request with the matching `expectedRunId` and routes the
     //      response to the ack oneshot as `Success`.
@@ -3752,12 +3797,12 @@ mod tests {
     // We don't test the full mode-gate fork here — that lives in lib.rs
     // and is covered by goose e2e (Eva's lane).
 
-    /// Steer with no `active_run_id` set acks `ExpectedRunIdMissing`
-    /// without writing anything. The read loop continues normally and
+    /// Steer with no `active_run_id` set acks `Unsupported` without writing
+    /// anything. The read loop continues normally and
     /// eventually hits the idle timeout (which is fine — we just need to
     /// observe the ack).
     #[tokio::test]
-    async fn native_steer_with_no_active_run_id_acks_expected_run_id_missing() {
+    async fn native_steer_with_no_active_run_id_acks_unsupported() {
         // Quiet process: never emits anything, so the read loop has only
         // the steer arm and the idle timeout to consider.
         let mut client = spawn_script("sleep 10").await;
@@ -3800,15 +3845,15 @@ mod tests {
             "expected IdleTimeout once steer was acked + script stayed silent, got {read_result:?}"
         );
 
-        // Ack must be ExpectedRunIdMissing — the steer arm bailed out
-        // without writing because active_run_id was None at write time.
+        // Ack must be Unsupported — the steer arm bailed out without writing
+        // because active_run_id was None at write time.
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");
-        match ack {
-            crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
-            other => panic!("expected SteerAck::Err(ExpectedRunIdMissing), got {other:?}"),
-        }
+        assert!(
+            matches!(ack, crate::pool::SteerAck::Unsupported),
+            "expected SteerAck::Unsupported, got {ack:?}"
+        );
     }
 
     /// Steer with `active_run_id` set writes the JSON-RPC request and
@@ -4025,11 +4070,12 @@ mod tests {
     /// cover the handshake itself.
     fn set_steering_supported(client: &mut AcpClient) {
         client.steering_supported = true;
+        client.refresh_steering_availability();
     }
 
     /// Run `initialize` against a script that replies with `init_result` as
-    /// the JSON-RPC result, and return the resulting `steering_supported`.
-    async fn steering_supported_after_initialize(init_result: &str) -> bool {
+    /// the JSON-RPC result, and return the parsed flag plus the shared view.
+    async fn steering_state_after_initialize(init_result: &str) -> (bool, bool) {
         let script = format!(
             "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \
              sleep 5",
@@ -4040,7 +4086,10 @@ mod tests {
             .initialize()
             .await
             .expect("initialize should succeed");
-        client.steering_supported()
+        (
+            client.steering_supported(),
+            client.steering_availability().is_available(),
+        )
     }
 
     /// Test 1a: an adapter advertising `_meta.steering.supported: true`
@@ -4048,13 +4097,17 @@ mod tests {
     /// `src/CodexAcpServer.ts:247`) is recorded as steering-capable.
     #[tokio::test]
     async fn initialize_records_steering_supported_when_advertised() {
-        let supported = steering_supported_after_initialize(
+        let (supported, available) = steering_state_after_initialize(
             r#"{"protocolVersion":2,"agentCapabilities":{},"_meta":{"steering":{"supported":true}}}"#,
         )
         .await;
         assert!(
             supported,
             "_meta.steering.supported: true must set steering_supported"
+        );
+        assert!(
+            available,
+            "the main-loop availability view must receive the handshake capability"
         );
     }
 
@@ -4063,20 +4116,21 @@ mod tests {
     /// agents that never implemented it.
     #[tokio::test]
     async fn initialize_leaves_steering_unsupported_when_meta_absent() {
-        let supported =
-            steering_supported_after_initialize(r#"{"protocolVersion":2,"agentCapabilities":{}}"#)
+        let (supported, available) =
+            steering_state_after_initialize(r#"{"protocolVersion":2,"agentCapabilities":{}}"#)
                 .await;
         assert!(
             !supported,
             "absent _meta must leave steering_supported false"
         );
+        assert!(!available, "absent capability must stay unavailable");
     }
 
     /// Test 1c: an explicit `supported: false` is respected, not treated as
     /// "the key exists so it must work".
     #[tokio::test]
     async fn initialize_leaves_steering_unsupported_when_explicitly_false() {
-        let supported = steering_supported_after_initialize(
+        let (supported, available) = steering_state_after_initialize(
             r#"{"protocolVersion":2,"_meta":{"steering":{"supported":false}}}"#,
         )
         .await;
@@ -4084,6 +4138,7 @@ mod tests {
             !supported,
             "_meta.steering.supported: false must leave steering_supported false"
         );
+        assert!(!available, "explicit false must stay unavailable");
     }
 
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the
@@ -4325,7 +4380,7 @@ mod tests {
     }
 
     /// Test 4 (companion to the existing
-    /// `native_steer_with_no_active_run_id_acks_expected_run_id_missing`):
+    /// `native_steer_with_no_active_run_id_acks_unsupported`):
     /// no run id AND no advertised capability means nothing is written at
     /// all. This is the gate that keeps a steer off the wire for adapters
     /// that never implemented either method.
@@ -4346,10 +4401,10 @@ mod tests {
             written.is_none(),
             "no transport available must write nothing; wrote: {written:?}"
         );
-        match ack {
-            crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
-            other => panic!("expected Err(ExpectedRunIdMissing), got {other:?}"),
-        }
+        assert!(
+            matches!(ack, crate::pool::SteerAck::Unsupported),
+            "expected Unsupported, got {ack:?}"
+        );
     }
 
     // ── Goose usage notification integration ──────────────────────────────
