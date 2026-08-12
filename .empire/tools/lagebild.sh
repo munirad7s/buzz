@@ -398,7 +398,9 @@ if command -v docker >/dev/null 2>&1; then
   echo "containers_unhealthy=$(docker ps -q -f health=unhealthy 2>/dev/null | wc -l)"
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$KUMA_CONTAINER"; then
     if docker exec "$KUMA_CONTAINER" sqlite3 "file:/app/data/kuma.db?mode=ro" \
-         "SELECT 'kuma_row=' || h.status || '|' || m.name FROM monitor m JOIN heartbeat h ON h.id=(SELECT id FROM heartbeat WHERE monitor_id=m.id ORDER BY time DESC LIMIT 1) WHERE m.active=1;" 2>/dev/null
+         "SELECT 'kuma_active_count=' || COUNT(*) FROM monitor WHERE active=1;
+          SELECT 'kuma_row=' || h.status || '|' || m.name FROM monitor m JOIN heartbeat h ON h.id=(SELECT id FROM heartbeat WHERE monitor_id=m.id ORDER BY time DESC LIMIT 1) WHERE m.active=1;
+          SELECT 'kuma_never_beat=' || m.name FROM monitor m WHERE m.active=1 AND NOT EXISTS (SELECT 1 FROM heartbeat h WHERE h.monitor_id=m.id);" 2>/dev/null
     then
       # agency-infra#134: aktive Monitore OHNE jede Benachrichtigung. Ein
       # stummer Waechter ist teurer als keiner, weil man sich auf ihn
@@ -426,7 +428,7 @@ REMOTE
     return
   fi
 
-  local uptime_days load1 disk_pct disk_avail docker_ok running exited unhealthy kuma_ok
+  local uptime_days load1 disk_pct disk_avail docker_ok running exited unhealthy kuma_ok kuma_active_count
   uptime_days="$(grep -m1 '^uptime_days=' "$TMP/server.raw" | cut -d= -f2)"
   load1="$(grep -m1 '^load1=' "$TMP/server.raw" | cut -d= -f2)"
   disk_pct="$(grep -m1 '^disk_used_pct=' "$TMP/server.raw" | cut -d= -f2)"
@@ -436,8 +438,10 @@ REMOTE
   exited="$(grep -m1 '^containers_exited=' "$TMP/server.raw" | cut -d= -f2)"
   unhealthy="$(grep -m1 '^containers_unhealthy=' "$TMP/server.raw" | cut -d= -f2)"
   kuma_ok="$(grep -m1 '^kuma_ok=' "$TMP/server.raw" | cut -d= -f2)"
+  kuma_active_count="$(grep -m1 '^kuma_active_count=' "$TMP/server.raw" | cut -d= -f2)"
 
   grep '^kuma_row=' "$TMP/server.raw" | sed 's/^kuma_row=//' > "$TMP/kuma.txt" || true
+  grep '^kuma_never_beat=' "$TMP/server.raw" | sed 's/^kuma_never_beat=//' > "$TMP/kuma_never_beat.txt" || true
   grep '^kuma_silent=' "$TMP/server.raw" | sed 's/^kuma_silent=//' > "$TMP/kuma_silent.txt" || true
 
   jq -n \
@@ -445,15 +449,18 @@ REMOTE
     --arg disk_pct "${disk_pct:-}" --arg disk_avail "${disk_avail:-}" \
     --arg docker_ok "${docker_ok:-0}" --arg running "${running:-}" \
     --arg exited "${exited:-}" --arg unhealthy "${unhealthy:-}" \
-    --arg kuma_ok "${kuma_ok:-0}" --rawfile kuma "$TMP/kuma.txt" \
+    --arg kuma_ok "${kuma_ok:-0}" --arg kuma_active_count "${kuma_active_count:-}" \
+    --rawfile kuma "$TMP/kuma.txt" --rawfile kuma_never_beat "$TMP/kuma_never_beat.txt" \
     --rawfile kuma_silent "$TMP/kuma_silent.txt" '
     ($kuma | split("\n") | map(select(length>0) | split("|") | {status:(.[0]|tonumber), name:(.[1:]|join("|"))})) as $mon
     | ($mon|map(select(.status==0))) as $down
     | ($mon|map(select(.status==2))) as $pending
+    | ($kuma_never_beat | split("\n") | map(select(length>0))) as $never_beat
     | ($kuma_silent | split("\n") | map(select(length>0))) as $silent
     | {
         state: (if ($docker_ok != "1") or ($kuma_ok != "1") then "warn"
                 elif ($down|length) > 0 then "warn"
+                elif ($never_beat|length) > 0 then "warn"
                 elif ($silent|length) > 0 then "warn"
                 elif (($disk_pct|tonumber?) // 0) >= 90 then "warn"
                 elif (($unhealthy|tonumber?) // 0) > 0 then "warn"
@@ -467,13 +474,15 @@ REMOTE
         containers_exited: ($exited|tonumber? // null),
         containers_unhealthy: ($unhealthy|tonumber? // null),
         kuma_readable: ($kuma_ok == "1"),
-        kuma_active: ($mon|length),
+        kuma_active: ($kuma_active_count|tonumber? // null),
         kuma_down: ($down|map(.name)),
         kuma_pending: ($pending|map(.name)),
+        kuma_never_beat: $never_beat,
         kuma_silent: $silent,
         reason: (if ($docker_ok != "1") then "docker auf dem Host nicht abfragbar"
                  elif ($kuma_ok != "1") then "Uptime-Kuma nicht lesbar — Monitor-Status UNBEKANNT, nicht grün"
                  elif ($down|length) > 0 then (($down|length)|tostring) + " Monitor(e) rot"
+                 elif ($never_beat|length) > 0 then (($never_beat|length)|tostring) + " Monitor(e) noch nie gelaufen: " + ($never_beat|join(", "))
                  elif ($silent|length) > 0 then (($silent|length)|tostring) + " Monitor(e) STUMM (keine Benachrichtigung): " + ($silent|join(", "))
                  elif (($disk_pct|tonumber? // 0) >= 90) then "Disk >= 90 %"
                  elif (($unhealthy|tonumber? // 0) > 0) then "unhealthy Container"
@@ -738,6 +747,9 @@ else
           + "\n  Kuma: " + (if .server.kuma_readable then (.server.kuma_active|tostring) + " aktiv · " + (.server.kuma_down|length|tostring) + " rot"
                             + (if (.server.kuma_down|length) > 0 then " (" + (.server.kuma_down|join(", ")) + ")" else "" end)
                             + (if (.server.kuma_pending|length) > 0 then " · " + (.server.kuma_pending|length|tostring) + " pending (" + (.server.kuma_pending|join(", ")) + ")" else "" end)
+                            + (if ((.server.kuma_never_beat // [])|length) > 0
+                               then " | " + ((.server.kuma_never_beat|length)|tostring) + " NIE GELAUFEN (" + (.server.kuma_never_beat|join(", ")) + ")"
+                               else "" end)
                             + (if ((.server.kuma_silent // [])|length) > 0
                                then " · " + ((.server.kuma_silent|length)|tostring) + " STUMM (" + (.server.kuma_silent|join(", ")) + ")"
                                else "" end)

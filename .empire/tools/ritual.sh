@@ -729,6 +729,9 @@ befunde() {
                  then ((.server.containers_unhealthy|tostring)) + " Dienste sind ungesund" else empty end),
                 (if ((.server.disk_used_pct // 0)|tonumber? // 0) >= 90
                  then "die Festplatte ist zu " + (.server.disk_used_pct|tostring) + " Prozent voll" else empty end),
+                (if ((.server.kuma_never_beat // [])|length) > 0
+                 then "diese Monitore sind noch nie gelaufen: "
+                      + ((.server.kuma_never_beat)|join(", ")) else empty end),
                 # agency-infra#134: ein Monitor ohne Benachrichtigung wird nie
                 # rot GEMELDET. Er kann also nur hier auffallen — sonst fällt
                 # er nie auf, und das ist der gefährlichere Zustand als "rot".
