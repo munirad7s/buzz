@@ -31,7 +31,8 @@ use uuid::Uuid;
 
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod,
+    SteeringAvailability, StopReason,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -65,7 +66,21 @@ pub struct TaskMeta {
     /// `ControlSignal::Steer` cancel+merge path. `None` for heartbeat
     /// tasks only — all prompt tasks install a steer channel regardless
     /// of the agent's name.
-    pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    pub steer_tx: Option<SteerHandle>,
+}
+
+pub struct SteerHandle {
+    tx: tokio::sync::mpsc::Sender<SteerRequest>,
+    availability: SteeringAvailability,
+}
+
+impl SteerHandle {
+    pub(crate) fn new(
+        tx: tokio::sync::mpsc::Sender<SteerRequest>,
+        availability: SteeringAvailability,
+    ) -> Self {
+        Self { tx, availability }
+    }
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -315,11 +330,8 @@ pub enum ControlSignal {
 /// cross-adapter `_session/steering` method when the agent advertised
 /// `_meta.steering.supported` at `initialize`. That method takes no run id, so
 /// no freshness concern applies to it. When neither transport is available the
-/// read loop acks [`SteerError::ExpectedRunIdMissing`]. The main loop maps that
-/// to the "Err-before-pending" bucket: no withhold/mark was established at
-/// `pool::send_steer` time because the request was rejected before any
-/// write, so the watcher only needs to release nothing and fall back to the
-/// universal `ControlSignal::Steer` cancel+merge path.
+/// read loop acks [`SteerAck::Unsupported`]. The main loop releases the event
+/// for normal FIFO dispatch after the current turn instead of cancelling it.
 pub struct SteerRequest {
     /// Prompt body text blocks. Each entry becomes one `text` content
     /// block in `params.prompt`. Built by the main loop via
@@ -354,16 +366,6 @@ pub enum SteerError {
     /// Transport-level failure: write error, read EOF, JSON-RPC framing
     /// violation, etc. The string carries the underlying `AcpError`'s display.
     Transport(String),
-    /// At steer-write time neither steer transport was available: no
-    /// `expectedRunId` (`AcpClient::active_run_id` was `None`, so the
-    /// goose-native method could not be formed) and the agent did not
-    /// advertise the cross-adapter `_session/steering` extension. The read
-    /// loop drops the request without writing anything; the main loop should
-    /// release any withheld event and fall back to the universal cancel+merge
-    /// `ControlSignal::Steer` path. This is in the same "Err-before-pending"
-    /// bucket as `Transport` write failures: no in-process state was
-    /// established, so no in-process cleanup is needed.
-    ExpectedRunIdMissing,
     /// A `_session/steering` request returned a JSON-RPC *success* whose
     /// `outcome` was not one of the two recognized delivery outcomes
     /// (`injected`, `startedNewTurn`) — including `failed` (codex-acp) and a
@@ -396,6 +398,11 @@ pub enum SteerAck {
     /// The main loop must drop the withheld event (`remove_event`) — it
     /// has been delivered via the non-cancelling path.
     Success,
+    /// No steer transport was available at write time. The event was not sent
+    /// to the runtime and must remain queued for normal dispatch after the
+    /// running turn completes. This is not an error and must not cancel the
+    /// turn.
+    Unsupported,
     /// The steer was attempted but failed. Delivery state for the
     /// underlying message is unknown after prompt completion; the main
     /// loop must release the withheld event and fall back to the
@@ -626,6 +633,16 @@ impl AgentPool {
         })
     }
 
+    /// Whether the in-flight turn for `channel_id` currently exposes a
+    /// non-cancelling steer transport.
+    pub fn steering_available(&self, channel_id: Uuid) -> bool {
+        self.task_map
+            .values()
+            .find(|meta| meta.channel_id == Some(channel_id))
+            .and_then(|meta| meta.steer_tx.as_ref())
+            .is_some_and(|handle| handle.availability.is_available())
+    }
+
     /// Count of agents that are alive: idle OR checked out (have a task_map entry).
     ///
     /// Used to detect when all agents have exited so the caller can respawn.
@@ -675,11 +692,13 @@ impl AgentPool {
             .values_mut()
             .find(|m| m.channel_id == Some(channel_id))
             .ok_or(SteerError::PromptCompleted)?;
-        let tx = meta
+        let handle = meta
             .steer_tx
             .as_ref()
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
-        tx.try_send(request)
+        handle
+            .tx
+            .try_send(request)
             .map_err(|e| SteerError::Transport(e.to_string()))
     }
 
