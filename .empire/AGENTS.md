@@ -632,7 +632,7 @@ Danach dieselbe Abfrage: alle fünf `✔ Connected`.
 
 | Server | Zweck | Secrets |
 |---|---|---|
-| `obsidian-mcp-tools` | Vault lesen (Plugin-Binary im Vault, 18 Tools) | keine |
+| `obsidian-mcp-tools` | Vault lesen (Plugin-Binary im Vault, 18 Tools) | `OBSIDIAN_API_KEY` über Shim |
 | `n8n-api` | n8n lesen (`n8n_health_check`, `n8n_executions`, `n8n_list_workflows`; 24 Tools) | über Shim |
 | `google-mcp` · `telegram-mcp` · `espo-mcp` | Gmail (#4) · Kanal (#5) · CRM (#6) | Server lesen `master.env` selbst |
 
@@ -640,15 +640,19 @@ Danach dieselbe Abfrage: alle fünf `✔ Connected`.
 
 ### Keine Secrets in `.mcp.json` — `.empire/tools/mcp-env-shim.js`
 
-`n8n-api` braucht `N8N_API_URL`/`N8N_API_KEY`. Beides in `~/.buzz/.mcp.json` zu schreiben wäre bequem, macht die Datei aber unveröffentlichbar — und der Nest wird bei Buzz-Upgrades regeneriert, die Wiederherstellungsquelle ist dieses **öffentliche** Repo. Deshalb startet der Server über einen Shim, der die Keys zur Laufzeit aus `~/.secrets/master.env` holt und **nur die per `--keys` benannten** weiterreicht (Allowlist statt Vollexport von 200+ Secrets):
+`n8n-api` braucht `N8N_API_URL`/`N8N_API_KEY`; das installierte `obsidian-mcp-tools` braucht inzwischen `OBSIDIAN_API_KEY`. Die Werte in `~/.buzz/.mcp.json` zu schreiben wäre bequem, macht die Datei aber unveröffentlichbar — und der Nest wird bei Buzz-Upgrades regeneriert, die Wiederherstellungsquelle ist dieses **öffentliche** Repo. Deshalb starten beide Server über denselben Shim, der die Keys zur Laufzeit aus `~/.secrets/master.env` holt und **nur die per `--keys` benannten** weiterreicht (Allowlist statt Vollexport von 200+ Secrets):
 
 ```json
 "n8n-api": { "type": "stdio", "command": "node",
   "args": ["C:/Users/rescue/.buzz/mcp-env-shim.js", "--keys", "N8N_API_URL,N8N_API_KEY",
            "--", "C:/Users/rescue/AppData/Local/Volta/bin/n8n-mcp.cmd"] }
+
+"obsidian-mcp-tools": { "type": "stdio", "command": "node",
+  "args": ["C:/Users/rescue/.buzz/mcp-env-shim.js", "--keys", "OBSIDIAN_API_KEY",
+           "--", "C:/Users/rescue/Documents/Ai_Brain/.obsidian/plugins/mcp-tools/bin/mcp-server.exe"] }
 ```
 
-Rot-Proben gemessen: Schlüssel fehlt → Exit 65 mit Klartext, Env-Datei fehlt → Exit 66. Der Shim startet nie still ohne Key. Kanonische Kopie: `.empire/tools/mcp-env-shim.js` → `cp` nach `~/.buzz/mcp-env-shim.js`.
+Rot-Proben gemessen: Schlüssel fehlt → Exit 65 mit Klartext, Env-Datei fehlt → Exit 66. Der Shim startet nie still ohne Key. Für Obsidian liefert derselbe Binary-Pfad ohne injizierten Key einen Fehler und mit dem vorhandenen Credential 18 Tools. Kanonische Kopie: `.empire/tools/mcp-env-shim.js` → `cp` nach `~/.buzz/mcp-env-shim.js`.
 
 ### Lesen erlaubt, Schreiben hart verboten (`permissions.deny`)
 
