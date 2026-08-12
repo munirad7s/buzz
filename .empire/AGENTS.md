@@ -696,19 +696,11 @@ Der einzige Unterschied außerhalb von `projects` waren Telemetrie-Zähler, die 
 | Backlog-Werkzeug | `gh issue list -R munirad7s/buzz --label ready --state open` → **16**, identisch mit der unabhängigen Zählung |
 | **Detektor kann rot werden** | vor dem Fix meldete derselbe Pfad „Pending approval" und die Tools fehlten in der Session; Shim-Rot-Proben Exit 65/66; `claude mcp list` warnt zusätzlich vor der Doppel-Definition `n8n-api` (user vs. project) und benennt den aktiven Endpunkt |
 
-### Offen — harter Blocker: Abo-Kontingent, nicht die Verdrahtung
+### Dispatcher-Fallback ohne neues Abo (buzz#3, 2026-08-12)
 
-Der Kanal-Beweis für die drei Fachfragen (Vault/Backlog/n8n **als Antwort des Dispatchers**) steht aus. Ab 15:39 CEST beantwortet der `claude`-Agent gar nichts mehr:
+Der frühere Claude-Blocker ist überholt: Der offizielle Claude-Login verlangt Max/Pro und ist wegen des No-Spend-Gates kein zulässiger Pfad. Der bereits angemeldete Buzz-`codex`-Agent übernimmt deshalb zusätzlich die Dispatcher-Rolle über Munirs bestehendes ChatGPT-Abo. Es gibt keinen API-Key, kein Upgrade und keinen zweiten Agenten-Login.
 
-```
-WARN buzz_acp: agent_returned (application error — pipe intact) agent=0
-  configured_model=claude-fable-5[1m]
-  error=Agent reported error (code -32603): Internal error: You're out of usage credits.
-```
-
-Dieselbe Klasse wie der Codex-Befund aus buzz#18, nur auf dem Claude-Abo: **die Auth ist heil, das Kontingent ist leer.** `claude-fable-5[1m]` ist die 1M-Kontext-Variante; dieselbe Maschine bedient parallel weiter andere Modelle (die Beweise oben liefen über `--model sonnet`). Der Agent bleibt gesund (`pipe intact`), requeued mit exponentiellem Backoff (7 s → 276 s) und verliert die Nachricht danach.
-
-Headless nicht umgehbar: das Modell steckt im Agent-Record, und `managed-agents.json` hat **keinen File-Watcher** (`managed_agents/reconcile.rs:13` — „hand edits are picked up at next boot only"); zudem gibt `session/new` das Modell explizit vor, ein `model` in den Nest-Settings sticht das nicht. Ein Modellwechsel ist ein Klick in Munirs Desktop oder ein App-Neustart mit fünf laufenden Agenten — beides gehört ihm.
+Der Agent behält `cwd=C:/Users/rescue/.buzz`, die dortige `AGENTS.md`-Persona, seine bestehende Buzz-Identität und `CODEX_HOME=~/.codex-buzz`. Vault und n8n werden nur in diesem Agenten-Home konfiguriert; GitHub bleibt `gh`. Die drei Fachfragen werden erst nach echtem `#agent-lab`-Beweis als erledigt gewertet.
 
 ### Wiederherstellung nach einem Buzz-Upgrade
 
@@ -1051,14 +1043,22 @@ Zwei Betriebsregeln folgen daraus:
 1. **Nach jedem `codex login`** (und nach allem, was die Datei ersetzt statt beschreibt) `bash .empire/tools/codex-agent-home.sh verify` laufen lassen. Meldet es „KEIN Hardlink mehr", stellt `setup` ihn wieder her (die verwaiste Datei wird als `*.stale-<ts>` beiseitegelegt, nie gelöscht).
 2. **Der Fehlermodus ist laut, nicht leise.** Bricht der Link, läuft das Agenten-Token ab und der Agent meldet `Not logged in` bzw. 401 — er antwortet nicht still falsch. Ob die Codex-Engine die Datei ersetzt oder beschreibt, ist **nicht gemessen** (seit 27.07. keine Erneuerung passiert); deshalb der Wächter statt einer Behauptung.
 
-### Welche MCP-Server der `codex`-Agent bekommt: vorerst keine
+### Welche MCP-Server der `codex`-Dispatcher bekommt: genau zwei
 
-Ausgangspunkt war die Nest-Auswahl aus buzz#4 (`~/.buzz/.mcp.json`: `google-mcp`, `telegram-mcp`, `espo-mcp`, `obsidian-mcp-tools`, `n8n-api`). Übernommen wurde **keiner** — mit Begründung, nicht aus Bequemlichkeit:
+Buzz#3 erweitert die Rolle vom Builder/Reviewer zum kompatiblen Dispatcher. Deshalb installiert `.empire/tools/codex-agent-home.sh setup` genau zwei lokale Server in `~/.codex-buzz/config.toml`:
 
-- Die Nest-Auswahl ist die **Dispatcher-Ausstattung** (Mail lesen, CRM lesen, Kanal melden). Der `codex`-Strang ist laut Kosten-Routing der **Builder/Reviewer** — sein Werkzeug ist die Shell, und die Empire-Werkzeuge (`gate.sh`, `vault-log.sh`, `lagebild.sh`, `gh`, `rtk`) sind Shell-Skripte, keine MCP-Tools.
-- `~/.buzz/.mcp.json` ist Claude-Code-Projekt-Scope. Codex liest die Datei gar nicht — die fünf Server müssten in `config.toml` **dupliziert** werden. Ein zweiter Ort für dieselbe Wahrheit ist genau der Doppelbau, den Doktrin 3 verbietet.
-- Was der Agent im Kanal braucht, bekommt er ohnehin: buzz-acp reicht `buzz-cli` als MCP-Subprozess über `session/new` durch — unabhängig von `config.toml`.
-- Alle fünf Nest-Server sind stdio-lokal und könnten **keinen** `AuthRequired`-Fehler erzeugen. Sie kosten aber je einen Node-Start pro Session. Bei Bedarf werden sie einzeln nachgetragen — die Regel ist „aus gemessenem Bedarf", nicht „vorsichtshalber alle".
+- `obsidian-mcp-tools` über den Secret-Shim mit der Allowlist `OBSIDIAN_API_KEY`;
+- `n8n-api` über denselben Shim mit `N8N_API_URL,N8N_API_KEY`.
+
+Es gibt kein `env =` und keine Credential-Werte in der TOML. Codex-native `disabled_tools` reproduzieren die zehn n8n- und sieben Vault-Denies aus dem Claude-Nest exakt. `google-mcp`, `telegram-mcp` und `espo-mcp` bleiben draußen; sie gehören nicht zum read-only DoD von #3. GitHub bleibt bewusst `gh`, und `buzz-acp` reicht den Buzz-Kanaltransport weiter separat über `session/new` durch.
+
+`setup` ersetzt nur einen markierten, agentenlokalen Block, bewahrt fremde Einstellungen, legt vor Änderungen eine Rollback-Kopie an und ist byte-idempotent. `verify` prüft Serverzahl, Shim-Pfade, Secret-Namen-Allowlist und alle 17 Denies, ohne Werte zu lesen oder auszugeben.
+
+### Clock-Skew-Grenze im ACP (buzz#3)
+
+`buzz-acp` darf nach erfolgreichem TLS/WSS-Upgrade `Date` bzw. das produktive `cDate` der Relay-Edge verwenden. Akzeptiert werden nur RFC-2822-Zeit, höchstens 30 Sekunden Handshake-Laufzeit und höchstens 24 Stunden absoluter Offset. Der gegen den Request-Mittelpunkt berechnete Wert lebt atomar im Agentenprozess und verändert ausschließlich `created_at` neu signierter NIP-42- und NIP-98-Auth-Events.
+
+Windows-Uhr, normale Buzz-/Nostr-Events und die Relay-Verifier bleiben unverändert; insbesondere wird das ±60-Sekunden-Replayfenster nicht aufgeweicht. Fehlende, unsichere (`ws://`), langsame, unparsebare oder außerhalb der Grenze liegende Zeitproben werden verworfen. Im Log steht höchstens der akzeptierte Offset in Sekunden, nie Header, Challenge, Event oder Secret.
 
 Skills analog: statt 61 verworfener Beschreibungen liegen sechs Junctions in `~/.codex-buzz/skills/` (`review`, `fix-issue`, `deploy-check`, `explain`, `brain`, `markdown-converter`) plus das von Codex selbst angelegte `.system/`. Der Agent sieht damit wieder Skills — und zwar die, die zur Rolle passen.
 

@@ -12,30 +12,29 @@
 
 **Files:** `crates/buzz-acp/src/relay.rs`
 
-- [ ] Add tests for standard `Date`, production `cDate`, malformed/missing headers, non-WSS rejection, >24-hour rejection, >30-second RTT rejection, midpoint compensation, and saturating adjusted timestamps.
-- [ ] Add auth-event tests proving only NIP-42 and NIP-98 `created_at` use the offset while their required tags/signatures remain valid.
-- [ ] Run the focused tests and capture the expected RED result before production code.
-- [ ] Commit the RED tests with DCO sign-off.
+- [x] Add tests for standard `Date`, production `cDate`, malformed/missing headers, non-WSS rejection, >24-hour rejection, >30-second RTT rejection, midpoint compensation, and saturating adjusted timestamps.
+- [x] Add auth-event tests proving only NIP-42 and NIP-98 `created_at` use the offset while their required tags/signatures remain valid.
+- [x] Run the focused tests and capture the expected RED result before production code.
 
 ### Task 2: Implement the bounded shared auth clock
 
 **Files:** `crates/buzz-acp/src/relay.rs`
 
-- [ ] Add the private atomic clock and pure sample-validation helpers.
-- [ ] Measure the WSS handshake interval, parse `Date`/`cDate`, and refresh the clock on initial connect and reconnect.
-- [ ] Use `custom_created_at` only in the NIP-42 and NIP-98 event builders.
-- [ ] Keep relay verifier constants and ordinary event builders unchanged.
-- [ ] Run focused tests, `cargo fmt`, and the full `buzz-acp` test suite; commit GREEN with DCO.
+- [x] Add the private atomic clock and pure sample-validation helpers.
+- [x] Measure the WSS handshake interval, parse `Date`/`cDate`, and refresh the clock on initial connect and reconnect.
+- [x] Use `custom_created_at` only in the NIP-42 and NIP-98 event builders.
+- [x] Keep relay verifier constants and ordinary event builders unchanged.
+- [x] Run focused tests, `cargo fmt`, and the full `buzz-acp` test suite; commit GREEN with DCO.
 
 ### Task 3: Canonicalize the Codex dispatcher MCP and deny policy
 
 **Files:** `.empire/tools/codex-agent-home.sh`, `.empire/tools/test/codex-dispatcher-mcp-test.sh`, `.empire/AGENTS.md`
 
-- [ ] Add a focused regression that runs `codex-agent-home.sh setup` against temporary homes and expects exactly the two shim-backed servers, no inline secret values, and the same 17 denied tools as the Claude Nest.
-- [ ] Capture RED before changing the setup script.
-- [ ] Make `setup` install/update a marked dispatcher MCP block idempotently without replacing unrelated agent-scoped settings; make `verify` check semantics without printing values.
-- [ ] Update the Empire runbook and stale Claude-only blocker language.
-- [ ] Run the focused test, existing secret-shim tests, shell syntax checks, and live-config dry runs; commit with DCO.
+- [x] Add a focused regression that runs `codex-agent-home.sh setup` against temporary homes and expects exactly the two shim-backed servers, no inline secret values, and the same 17 denied tools as the Claude Nest.
+- [x] Capture RED before changing the setup script.
+- [x] Make `setup` install/update a marked dispatcher MCP block idempotently without replacing unrelated agent-scoped settings; make `verify` check semantics without printing values.
+- [x] Update the Empire runbook and stale Claude-only blocker language.
+- [x] Run the focused test, existing secret-shim tests, shell syntax checks, and live-config dry runs; commit with DCO.
 
 ### Task 4: Review and deliver the branch
 
