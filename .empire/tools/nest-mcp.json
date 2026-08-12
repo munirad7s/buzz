@@ -35,8 +35,14 @@
     },
     "obsidian-mcp-tools": {
       "type": "stdio",
-      "command": "C:/Users/rescue/Documents/Ai_Brain/.obsidian/plugins/mcp-tools/bin/mcp-server.exe",
-      "args": [],
+      "command": "node",
+      "args": [
+        "C:/Users/rescue/.buzz/mcp-env-shim.js",
+        "--keys",
+        "OBSIDIAN_API_KEY",
+        "--",
+        "C:/Users/rescue/Documents/Ai_Brain/.obsidian/plugins/mcp-tools/bin/mcp-server.exe"
+      ],
       "env": {}
     },
     "n8n-api": {
