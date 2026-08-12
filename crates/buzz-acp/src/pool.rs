@@ -40,6 +40,8 @@ use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
+#[cfg(test)]
+use crate::relay::RelayAuthClock;
 use crate::relay::{ChannelInfo, RestClient};
 
 /// Window within which agent activity before a hard-cap death qualifies
@@ -6414,6 +6416,7 @@ mod tests {
                 base_url: "http://127.0.0.1:0".to_string(),
                 keys: agent_keys.clone(),
                 auth_tag_json: None,
+                auth_clock: RelayAuthClock::default(),
             },
             channel_info: ChannelInfoResolver::new(
                 std::collections::HashMap::new(),
@@ -6422,6 +6425,7 @@ mod tests {
                     base_url: "http://127.0.0.1:0".to_string(),
                     keys: agent_keys.clone(),
                     auth_tag_json: None,
+                    auth_clock: RelayAuthClock::default(),
                 },
             ),
             context_message_limit: 0,
@@ -6784,6 +6788,7 @@ mod tests {
             base_url,
             keys: nostr::Keys::generate(),
             auth_tag_json: None,
+            auth_clock: RelayAuthClock::default(),
         };
         (
             ChannelInfoResolver::new(std::collections::HashMap::new(), rest),
