@@ -22,7 +22,11 @@
 //! channel. `next_event()` reads from the event receiver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Default capacity of the event channel from background task to harness.
 /// Override with `BUZZ_ACP_EVENT_BUFFER` env var at startup.
@@ -67,6 +71,11 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Raised from 10s to 30s so the OS TCP connect attempt (SYN→SYN-ACK) has time
 /// to succeed at 3.4s average / 10s max observed RTT.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum accepted difference between the local clock and the authenticated
+/// relay edge. This is intentionally much larger than the relay's ±60s auth
+/// window so a timezone-sized workstation skew can recover, but small enough
+/// to reject arbitrary or corrupted time injection.
+const MAX_RELAY_CLOCK_OFFSET_SECS: i64 = 24 * 60 * 60;
 /// Backoff delay values shared by the initial-connect retry in
 /// `HarnessRelay::connect()` and `try_autonomous_reconnect`'s post-start
 /// reconnect loop — a spotty link should get consistent retry pacing whether
@@ -122,11 +131,109 @@ use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{http::HeaderMap, Message},
+    MaybeTlsStream, WebSocketStream,
+};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::ChannelFilter;
+
+/// Relay-derived clock used only for NIP-42 and NIP-98 authentication events.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RelayAuthClock {
+    offset_secs: Arc<AtomicI64>,
+}
+
+impl RelayAuthClock {
+    #[cfg(test)]
+    fn with_offset(offset_secs: i64) -> Self {
+        Self {
+            offset_secs: Arc::new(AtomicI64::new(offset_secs)),
+        }
+    }
+
+    fn update_from_handshake(
+        &self,
+        relay_url: &str,
+        headers: &HeaderMap,
+        request_started_unix_millis: i64,
+        response_received_unix_millis: i64,
+    ) {
+        if let Some(offset_secs) = derive_relay_clock_offset(
+            relay_url,
+            headers,
+            request_started_unix_millis,
+            response_received_unix_millis,
+        ) {
+            self.offset_secs.store(offset_secs, Ordering::Relaxed);
+            info!(offset_secs, "accepted authenticated relay clock offset");
+        } else {
+            debug!("relay handshake did not yield an acceptable clock sample");
+        }
+    }
+
+    fn timestamp_at(&self, local_unix_secs: u64) -> nostr::Timestamp {
+        adjusted_auth_timestamp(local_unix_secs, self.offset_secs.load(Ordering::Relaxed))
+    }
+
+    fn now(&self) -> nostr::Timestamp {
+        self.timestamp_at(unix_now_secs())
+    }
+}
+
+fn system_time_unix_millis() -> Option<i64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    i64::try_from(millis).ok()
+}
+
+fn derive_relay_clock_offset(
+    relay_url: &str,
+    headers: &HeaderMap,
+    request_started_unix_millis: i64,
+    response_received_unix_millis: i64,
+) -> Option<i64> {
+    if url::Url::parse(relay_url).ok()?.scheme() != "wss" {
+        return None;
+    }
+
+    let round_trip_millis =
+        response_received_unix_millis.checked_sub(request_started_unix_millis)?;
+    if round_trip_millis < 0
+        || round_trip_millis > i64::try_from(CONNECT_TIMEOUT.as_millis()).ok()?
+    {
+        return None;
+    }
+
+    let header = headers.get("date").or_else(|| headers.get("cdate"))?;
+    let remote_unix_millis = chrono::DateTime::parse_from_rfc2822(header.to_str().ok()?)
+        .ok()?
+        .timestamp_millis();
+    let midpoint = request_started_unix_millis.checked_add(round_trip_millis / 2)?;
+    let offset_millis = remote_unix_millis.checked_sub(midpoint)?;
+    let rounded_offset_secs = if offset_millis >= 0 {
+        offset_millis.checked_add(500)?.checked_div(1_000)?
+    } else {
+        offset_millis.checked_sub(500)?.checked_div(1_000)?
+    };
+
+    (rounded_offset_secs.unsigned_abs() <= MAX_RELAY_CLOCK_OFFSET_SECS as u64)
+        .then_some(rounded_offset_secs)
+}
+
+fn adjusted_auth_timestamp(local_unix_secs: u64, offset_secs: i64) -> nostr::Timestamp {
+    let adjusted = if offset_secs >= 0 {
+        local_unix_secs.saturating_add(offset_secs as u64)
+    } else {
+        local_unix_secs.saturating_sub(offset_secs.unsigned_abs())
+    };
+    nostr::Timestamp::from_secs(adjusted)
+}
 
 /// Metadata about a channel, populated at discovery time.
 #[derive(Debug, Clone)]
@@ -236,6 +343,8 @@ pub struct RestClient {
     pub keys: Keys,
     /// Optional NIP-OA auth tag JSON for `x-auth-tag` header (relay membership delegation).
     pub auth_tag_json: Option<String>,
+    /// Shared relay-derived clock for NIP-98 authentication timestamps only.
+    pub(crate) auth_clock: RelayAuthClock,
 }
 
 /// Whether an HTTP status code is retriable (transient server/rate-limit errors).
@@ -269,6 +378,16 @@ impl RestClient {
         url: &str,
         body: Option<&[u8]>,
     ) -> Result<String, RelayError> {
+        self.sign_nip98_at(method, url, body, unix_now_secs())
+    }
+
+    fn sign_nip98_at(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&[u8]>,
+        local_unix_secs: u64,
+    ) -> Result<String, RelayError> {
         use base64::Engine;
         use sha2::{Digest, Sha256};
 
@@ -290,6 +409,7 @@ impl RestClient {
 
         let event = EventBuilder::new(Kind::HttpAuth, "")
             .tags(tags)
+            .custom_created_at(self.auth_clock.timestamp_at(local_unix_secs))
             .sign_with_keys(&self.keys)
             .map_err(|e| RelayError::Http(format!("NIP-98 sign error: {e}")))?;
         let event_json = serde_json::to_string(&event)
@@ -559,6 +679,8 @@ pub struct HarnessRelay {
     keys: Keys,
     /// Optional NIP-OA auth tag for relay membership delegation.
     auth_tag: Option<nostr::Tag>,
+    /// Relay-derived clock shared with NIP-42 reconnects and NIP-98 clients.
+    auth_clock: RelayAuthClock,
     /// Handle to the background task (for clean shutdown).
     /// Wrapped in `Option` so `shutdown()` can take ownership without conflicting
     /// with `Drop` (which only has `&mut self`).
@@ -612,13 +734,15 @@ impl HarnessRelay {
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
     ) -> Result<Self, RelayError> {
+        let auth_clock = RelayAuthClock::default();
         // Perform the initial connection and auth handshake, retrying
         // transient failures (dropped handshake, timeout) with bounded
         // jittered backoff. A terminal error (bad URL, bad auth tag,
         // rejected/invalid signing key) fails immediately — see
         // `is_terminal_connect_error`.
         let (ws, handshake_buffer) =
-            retry_initial_connect(|| do_connect(relay_url, keys, auth_tag.as_ref())).await?;
+            retry_initial_connect(|| do_connect(relay_url, keys, auth_tag.as_ref(), &auth_clock))
+                .await?;
 
         let (event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(event_channel_capacity());
         let (observer_control_tx, observer_control_rx) =
@@ -629,6 +753,7 @@ impl HarnessRelay {
         let bg_relay_url = relay_url.to_string();
         let bg_agent_pubkey_hex = agent_pubkey_hex.to_string();
         let bg_auth_tag = auth_tag.clone();
+        let bg_auth_clock = auth_clock.clone();
 
         let bg_handle = tokio::spawn(async move {
             run_background_task(
@@ -641,6 +766,7 @@ impl HarnessRelay {
                 bg_relay_url,
                 bg_agent_pubkey_hex,
                 bg_auth_tag,
+                bg_auth_clock,
             )
             .await;
         });
@@ -657,6 +783,7 @@ impl HarnessRelay {
             relay_url: relay_url.to_string(),
             keys: keys.clone(),
             auth_tag,
+            auth_clock,
             bg_handle: Some(bg_handle),
         })
     }
@@ -738,6 +865,7 @@ impl HarnessRelay {
                 .auth_tag
                 .as_ref()
                 .and_then(|t| serde_json::to_string(t.as_slice()).ok()),
+            auth_clock: self.auth_clock.clone(),
         }
     }
 
@@ -1554,6 +1682,7 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    auth_clock: RelayAuthClock,
 ) {
     let mut state = BgState::new();
 
@@ -1566,6 +1695,7 @@ async fn run_background_task(
         &keys,
         &relay_url,
         &agent_pubkey_hex,
+        &auth_clock,
         auth_tag.as_ref(),
     )
     .await;
@@ -1583,6 +1713,7 @@ async fn run_background_task(
             &agent_pubkey_hex,
             &event_tx,
             &observer_control_tx,
+            &auth_clock,
             auth_tag.as_ref(),
         )
         .await
@@ -1608,6 +1739,7 @@ async fn run_background_task(
                         &event_tx,
                         &observer_control_tx,
                         true,
+                        &auth_clock,
                         auth_tag.as_ref(),
                     )
                     .await,
@@ -1666,6 +1798,7 @@ async fn run_background_task(
                         &agent_pubkey_hex,
                         &event_tx,
                         &observer_control_tx,
+                        &auth_clock,
                         auth_tag.as_ref(),
                     )
                     .await
@@ -1697,6 +1830,7 @@ async fn run_background_task(
                                     &event_tx,
                                     &observer_control_tx,
                                     true,
+                                    &auth_clock,
                                     auth_tag.as_ref(),
                                 )
                                 .await,
@@ -1795,244 +1929,243 @@ async fn run_background_task(
         }
 
         tokio::select! {
-                   raw = ws.next() => {
-                       // Determine if the socket is lost.
-                       let socket_lost = match raw {
-                           Some(Ok(msg)) => {
-                               if matches!(msg, Message::Pong(_)) {
-                                   last_pong = Instant::now();
-                                   ping_sent = false;
-                                   false // pong is healthy — not a socket loss
-                               } else {
-                                   !handle_ws_message(
-                                       msg,
-                                       &mut ws,
-                                       &event_tx,
-                                       &observer_control_tx,
-                                       &mut state,
-                                       &keys,
-                                       &relay_url,
-                                       &agent_pubkey_hex,
-                                       auth_tag.as_ref(),
-                                   )
-                                   .await
-                               }
-                           }
-                           Some(Err(e)) => {
-                               warn!("WebSocket error in background task: {e}");
-                               true
-                           }
-                           None => {
-                               debug!("WebSocket stream ended");
-                               true
-                           }
-                       };
+            raw = ws.next() => {
+                // Determine if the socket is lost.
+                let socket_lost = match raw {
+                    Some(Ok(msg)) => {
+                        if matches!(msg, Message::Pong(_)) {
+                            last_pong = Instant::now();
+                            ping_sent = false;
+                            false // pong is healthy — not a socket loss
+                        } else {
+                            !handle_ws_message(
+                                msg,
+                                &mut ws,
+                                &event_tx,
+                                &observer_control_tx,
+                                &mut state,
+                                &keys,
+                                 &relay_url,
+                                 &agent_pubkey_hex,
+                                 &auth_clock,
+                                 auth_tag.as_ref(),
+                            )
+                            .await
+                        }
+                    }
+                    Some(Err(e)) => {
+                        warn!("WebSocket error in background task: {e}");
+                        true
+                    }
+                    None => {
+                        debug!("WebSocket stream ended");
+                        true
+                    }
+                };
 
-                       if socket_lost {
-                           // Signal the caller, then attempt autonomous reconnect.
-                           // Use try_send to avoid blocking on backpressure — recovery
-                           // must not stall when the event channel is full.
-                           let _ = event_tx.try_send(None);
-                           let outcome = try_autonomous_reconnect(
-                               &mut ws,
-                               &mut cmd_rx,
-                               &mut state,
-                               &keys,
-                               &relay_url,
-                               &agent_pubkey_hex,
-                               &event_tx,
-                           &observer_control_tx,
-            auth_tag.as_ref(),
-                           )
-                           .await;
-                           match outcome {
-                           ReconnectOutcome::Shutdown => return,
-                           ReconnectOutcome::Ok => {
-                               if matches!(
-                                   drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                   ReconnectOutcome::Shutdown
-                               ) { return; }
-                               // Reset ping state after reconnect.
-                               ping_sent = false;
-                               last_pong = Instant::now();
-                               connected_since = Instant::now();
-                               stable_logged = false;
-                           }
-                           ReconnectOutcome::Failed => {
-                               if matches!(
-                                   wait_for_reconnect(
-                                       &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
+                if socket_lost {
+                    // Signal the caller, then attempt autonomous reconnect.
+                    // Use try_send to avoid blocking on backpressure — recovery
+                    // must not stall when the event channel is full.
+                    let _ = event_tx.try_send(None);
+                    let outcome = try_autonomous_reconnect(
+                        &mut ws,
+                        &mut cmd_rx,
+                        &mut state,
+                        &keys,
+                        &relay_url,
+                        &agent_pubkey_hex,
+                        &event_tx,
+                        &observer_control_tx,
+                        &auth_clock,
                         auth_tag.as_ref(),
-                                   ).await,
-                                   ReconnectOutcome::Shutdown
-                               ) { return; }
-                               ping_sent = false;
-                               last_pong = Instant::now();
-                               connected_since = Instant::now();
-                               stable_logged = false;
-                           }
-                           } // end match outcome
-                       }
-                   }
+                    )
+                    .await;
+                    match outcome {
+                    ReconnectOutcome::Shutdown => return,
+                    ReconnectOutcome::Ok => {
+                        if matches!(
+                            drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
+                            ReconnectOutcome::Shutdown
+                        ) { return; }
+                        // Reset ping state after reconnect.
+                        ping_sent = false;
+                        last_pong = Instant::now();
+                        connected_since = Instant::now();
+                        stable_logged = false;
+                    }
+                    ReconnectOutcome::Failed => {
+                        if matches!(
+                            wait_for_reconnect(
+                                &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                                &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
+                                &auth_clock, auth_tag.as_ref(),
+                            ).await,
+                            ReconnectOutcome::Shutdown
+                        ) { return; }
+                        ping_sent = false;
+                        last_pong = Instant::now();
+                        connected_since = Instant::now();
+                        stable_logged = false;
+                    }
+                    } // end match outcome
+                }
+            }
 
-                   cmd = cmd_rx.recv() => {
-                       match cmd {
-                           Some(RelayCommand::Reconnect) => {
-                               if matches!(
-                                   wait_for_reconnect(
-                                       &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
-                        auth_tag.as_ref(),
-                                   ).await,
-                                   ReconnectOutcome::Shutdown
-                               ) { return; }
-                               ping_sent = false;
-                               last_pong = Instant::now();
-                               connected_since = Instant::now();
-                               stable_logged = false;
-                           }
-                           Some(RelayCommand::Shutdown) | None => {
-                               debug!("background task shutting down — sending close frame");
-                               let _ = ws_send_timeout(
-                                   &mut ws,
-                                   Message::Close(None),
-                                   WS_SEND_TIMEOUT_SECS,
-                               )
-                               .await;
-                               return;
-                           }
-                           Some(cmd) => {
-                               let ok = execute_connected_command(
-                                   &mut ws,
-                                   &mut state,
-                                   &agent_pubkey_hex,
-                                   cmd,
-                               )
-                               .await;
-                               if !ok {
-                                   // Send failed — socket is likely dead. Trigger reconnect.
-                                   warn!("command send failed — triggering reconnect");
-                                   let _ = event_tx.try_send(None);
-                                   match try_autonomous_reconnect(
-                                       &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx,
-                                   &observer_control_tx,
-            auth_tag.as_ref(),
-                                   ).await {
-                                       ReconnectOutcome::Shutdown => return,
-                                       ReconnectOutcome::Ok => {
-                                           if matches!(
-                                               drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                               ReconnectOutcome::Shutdown
-                                           ) { return; }
-                                       }
-                                       ReconnectOutcome::Failed => {
-                                           if matches!(
-                                               wait_for_reconnect(
-                                                   &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
-                        auth_tag.as_ref(),
-                                               ).await,
-                                               ReconnectOutcome::Shutdown
-                                           ) { return; }
-                                       }
-                                   }
-                                   ping_sent = false;
-                                   last_pong = Instant::now();
-                                   connected_since = Instant::now();
-                                   stable_logged = false;
-                               }
-                           }
-                       }
-                   }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(RelayCommand::Reconnect) => {
+                        if matches!(
+                            wait_for_reconnect(
+                                &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                                &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
+                                &auth_clock, auth_tag.as_ref(),
+                            ).await,
+                            ReconnectOutcome::Shutdown
+                        ) { return; }
+                        ping_sent = false;
+                        last_pong = Instant::now();
+                        connected_since = Instant::now();
+                        stable_logged = false;
+                    }
+                    Some(RelayCommand::Shutdown) | None => {
+                        debug!("background task shutting down — sending close frame");
+                        let _ = ws_send_timeout(
+                            &mut ws,
+                            Message::Close(None),
+                            WS_SEND_TIMEOUT_SECS,
+                        )
+                        .await;
+                        return;
+                    }
+                    Some(cmd) => {
+                        let ok = execute_connected_command(
+                            &mut ws,
+                            &mut state,
+                            &agent_pubkey_hex,
+                            cmd,
+                        )
+                        .await;
+                        if !ok {
+                            // Send failed — socket is likely dead. Trigger reconnect.
+                            warn!("command send failed — triggering reconnect");
+                            let _ = event_tx.try_send(None);
+                            match try_autonomous_reconnect(
+                                &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                                &agent_pubkey_hex, &event_tx, &observer_control_tx,
+                                &auth_clock, auth_tag.as_ref(),
+                            ).await {
+                                ReconnectOutcome::Shutdown => return,
+                                ReconnectOutcome::Ok => {
+                                    if matches!(
+                                        drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
+                                        ReconnectOutcome::Shutdown
+                                    ) { return; }
+                                }
+                                ReconnectOutcome::Failed => {
+                                    if matches!(
+                                            wait_for_reconnect(
+                                                &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                                                &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
+                                                &auth_clock, auth_tag.as_ref(),
+                                            ).await,
+                                        ReconnectOutcome::Shutdown
+                                    ) { return; }
+                                }
+                            }
+                            ping_sent = false;
+                            last_pong = Instant::now();
+                            connected_since = Instant::now();
+                            stable_logged = false;
+                        }
+                    }
+                }
+            }
 
-                   _ = ping_interval.tick() => {
-                       if ping_sent && last_pong.elapsed() > PONG_TIMEOUT {
-                           // No pong received after our last ping — connection is dead.
-                           warn!("no pong received within {:?} — connection dead, reconnecting", PONG_TIMEOUT);
-                           // Use try_send to avoid blocking on backpressure during recovery.
-                           let _ = event_tx.try_send(None);
-                           match try_autonomous_reconnect(
-                               &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx,
-                           &observer_control_tx,
-            auth_tag.as_ref(),
-                           ).await {
-                               ReconnectOutcome::Shutdown => return,
-                               ReconnectOutcome::Ok => {
-                                   if matches!(
-                                       drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                       ReconnectOutcome::Shutdown
-                                   ) { return; }
-                               }
-                               ReconnectOutcome::Failed => {
-                                   if matches!(
-                                       wait_for_reconnect(
-                                           &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
-                        auth_tag.as_ref(),
-                                       ).await,
-                                       ReconnectOutcome::Shutdown
-                                   ) { return; }
-                               }
-                           }
-                           ping_sent = false;
-                           last_pong = Instant::now();
-                           connected_since = Instant::now();
-                           stable_logged = false;
-                       } else if !ping_sent {
-                           if let Err(e) = ws_send_timeout(&mut ws, Message::Ping(vec![].into()), WS_SEND_TIMEOUT_SECS).await {
-                               warn!("failed to send ping: {e} — triggering reconnect");
-                               // Use try_send to avoid blocking on backpressure during recovery.
-                               let _ = event_tx.try_send(None);
-                               match try_autonomous_reconnect(
-                                   &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx,
-                               &observer_control_tx,
-            auth_tag.as_ref(),
-                               ).await {
-                                   ReconnectOutcome::Shutdown => return,
-                                   ReconnectOutcome::Ok => {
-                                       if matches!(
-                                           drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                           ReconnectOutcome::Shutdown
-                                       ) { return; }
-                                   }
-                                   ReconnectOutcome::Failed => {
-                                       if matches!(
-                                           wait_for_reconnect(
-                                               &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
-        &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
-                        auth_tag.as_ref(),
-                                           ).await,
-                                           ReconnectOutcome::Shutdown
-                                       ) { return; }
-                                   }
-                               }
-                               ping_sent = false;
-                               last_pong = Instant::now();
-                               connected_since = Instant::now();
-                               stable_logged = false;
-                           } else {
-                               ping_sent = true;
-                               debug!("sent ping to relay");
-                           }
-                       }
-                   }
+            _ = ping_interval.tick() => {
+                if ping_sent && last_pong.elapsed() > PONG_TIMEOUT {
+                    // No pong received after our last ping — connection is dead.
+                    warn!("no pong received within {:?} — connection dead, reconnecting", PONG_TIMEOUT);
+                    // Use try_send to avoid blocking on backpressure during recovery.
+                    let _ = event_tx.try_send(None);
+                    match try_autonomous_reconnect(
+                        &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                        &agent_pubkey_hex, &event_tx, &observer_control_tx,
+                        &auth_clock, auth_tag.as_ref(),
+                    ).await {
+                        ReconnectOutcome::Shutdown => return,
+                        ReconnectOutcome::Ok => {
+                            if matches!(
+                                drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
+                                ReconnectOutcome::Shutdown
+                            ) { return; }
+                        }
+                        ReconnectOutcome::Failed => {
+                            if matches!(
+                                wait_for_reconnect(
+                                    &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                                    &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
+                                    &auth_clock, auth_tag.as_ref(),
+                                ).await,
+                                ReconnectOutcome::Shutdown
+                            ) { return; }
+                        }
+                    }
+                    ping_sent = false;
+                    last_pong = Instant::now();
+                    connected_since = Instant::now();
+                    stable_logged = false;
+                } else if !ping_sent {
+                    if let Err(e) = ws_send_timeout(&mut ws, Message::Ping(vec![].into()), WS_SEND_TIMEOUT_SECS).await {
+                        warn!("failed to send ping: {e} — triggering reconnect");
+                        // Use try_send to avoid blocking on backpressure during recovery.
+                        let _ = event_tx.try_send(None);
+                        match try_autonomous_reconnect(
+                            &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                            &agent_pubkey_hex, &event_tx, &observer_control_tx,
+                            &auth_clock, auth_tag.as_ref(),
+                        ).await {
+                            ReconnectOutcome::Shutdown => return,
+                            ReconnectOutcome::Ok => {
+                                if matches!(
+                                    drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
+                                    ReconnectOutcome::Shutdown
+                                ) { return; }
+                            }
+                            ReconnectOutcome::Failed => {
+                                if matches!(
+                                    wait_for_reconnect(
+                                        &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                                        &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
+                                        &auth_clock, auth_tag.as_ref(),
+                                    ).await,
+                                    ReconnectOutcome::Shutdown
+                                ) { return; }
+                            }
+                        }
+                        ping_sent = false;
+                        last_pong = Instant::now();
+                        connected_since = Instant::now();
+                        stable_logged = false;
+                    } else {
+                        ping_sent = true;
+                        debug!("sent ping to relay");
+                    }
+                }
+            }
 
-                   // Pacing timer arm — wakes the loop for the next drain batch.
-                   // `pending()` when no drain is in progress so this arm never
-                   // fires spuriously and never blocks the other select! arms.
-                   _ = async {
-                       match drain_pacing_next {
-                           Some(t) => tokio::time::sleep_until(t).await,
-                           None => std::future::pending::<()>().await,
-                       }
-                   } => {
-                       drain_pacing_next = None;
-                   }
-               }
+            // Pacing timer arm — wakes the loop for the next drain batch.
+            // `pending()` when no drain is in progress so this arm never
+            // fires spuriously and never blocks the other select! arms.
+            _ = async {
+                match drain_pacing_next {
+                    Some(t) => tokio::time::sleep_until(t).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                drain_pacing_next = None;
+            }
+        }
 
         // Reset backoff_step on a long healthy run so a subsequent brief drop
         // retries at the short end of the backoff ladder.
@@ -2062,6 +2195,7 @@ async fn handle_ws_message(
     keys: &Keys,
     relay_url: &str,
     agent_pubkey_hex: &str,
+    auth_clock: &RelayAuthClock,
     auth_tag: Option<&nostr::Tag>,
 ) -> bool {
     match msg {
@@ -2357,8 +2491,15 @@ async fn handle_ws_message(
                 RelayMessage::Auth { challenge } => {
                     // AUTH send failure must trigger reconnect.
                     debug!("received mid-session AUTH challenge — re-authenticating");
-                    if let Err(e) =
-                        send_auth_response(ws, &challenge, relay_url, keys, auth_tag).await
+                    if let Err(e) = send_auth_response(
+                        ws,
+                        &challenge,
+                        relay_url,
+                        keys,
+                        auth_tag,
+                        auth_clock.now(),
+                    )
+                    .await
                     {
                         warn!("failed to respond to mid-session AUTH challenge: {e} — triggering reconnect");
                         return false;
@@ -2412,6 +2553,7 @@ async fn process_handshake_buffer(
     keys: &Keys,
     relay_url: &str,
     agent_pubkey_hex: &str,
+    auth_clock: &RelayAuthClock,
     auth_tag: Option<&nostr::Tag>,
 ) -> bool {
     if buffer.is_empty() {
@@ -2455,6 +2597,7 @@ async fn process_handshake_buffer(
                 keys,
                 relay_url,
                 agent_pubkey_hex,
+                auth_clock,
                 auth_tag,
             )
             .await;
@@ -2912,6 +3055,7 @@ async fn try_autonomous_reconnect(
     agent_pubkey_hex: &str,
     event_tx: &mpsc::Sender<Option<BuzzEvent>>,
     observer_control_tx: &mpsc::Sender<Event>,
+    auth_clock: &RelayAuthClock,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
@@ -2934,7 +3078,7 @@ async fn try_autonomous_reconnect(
             attempt + 1,
             backoffs.len()
         );
-        match do_connect(relay_url, keys, auth_tag).await {
+        match do_connect(relay_url, keys, auth_tag, auth_clock).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
@@ -2947,6 +3091,7 @@ async fn try_autonomous_reconnect(
                     keys,
                     relay_url,
                     agent_pubkey_hex,
+                    auth_clock,
                     auth_tag,
                 )
                 .await;
@@ -3042,6 +3187,7 @@ async fn wait_for_reconnect(
     event_tx: &mpsc::Sender<Option<BuzzEvent>>,
     observer_control_tx: &mpsc::Sender<Event>,
     skip_drain: bool,
+    auth_clock: &RelayAuthClock,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
@@ -3072,7 +3218,7 @@ async fn wait_for_reconnect(
     let mut attempt = state.backoff_step;
     loop {
         info!("attempting relay reconnect to {relay_url}…");
-        match do_connect(relay_url, keys, auth_tag).await {
+        match do_connect(relay_url, keys, auth_tag, auth_clock).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("relay reconnected to {relay_url}");
@@ -3085,6 +3231,7 @@ async fn wait_for_reconnect(
                     keys,
                     relay_url,
                     agent_pubkey_hex,
+                    auth_clock,
                     auth_tag,
                 )
                 .await;
@@ -3449,30 +3596,38 @@ async fn send_auth_response(
     relay_url: &str,
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
+    created_at: nostr::Timestamp,
 ) -> Result<(), RelayError> {
-    let relay_nostr_url = RelayUrl::parse(relay_url)
-        .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
-
-    let auth_event = if let Some(tag) = auth_tag {
-        // Cannot use EventBuilder::auth() shortcut — it doesn't accept extra tags.
-        let tags = vec![
-            nostr::Tag::parse(["relay", relay_url])
-                .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
-            nostr::Tag::parse(["challenge", challenge])
-                .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
-            tag.clone(),
-        ];
-        EventBuilder::new(nostr::Kind::Authentication, "")
-            .tags(tags)
-            .sign_with_keys(keys)?
-    } else {
-        EventBuilder::auth(challenge, relay_nostr_url).sign_with_keys(keys)?
-    };
+    let auth_event = build_nip42_auth_event(challenge, relay_url, keys, auth_tag, created_at)?;
 
     let auth_msg = serde_json::to_string(&json!(["AUTH", auth_event]))?;
     ws_send_timeout(ws, Message::Text(auth_msg.into()), WS_SEND_TIMEOUT_SECS).await?;
     debug!("sent AUTH response for challenge");
     Ok(())
+}
+
+fn build_nip42_auth_event(
+    challenge: &str,
+    relay_url: &str,
+    keys: &Keys,
+    auth_tag: Option<&nostr::Tag>,
+    created_at: nostr::Timestamp,
+) -> Result<Event, RelayError> {
+    RelayUrl::parse(relay_url).map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+    let mut tags = vec![
+        nostr::Tag::parse(["relay", relay_url])
+            .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
+        nostr::Tag::parse(["challenge", challenge])
+            .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
+    ];
+    if let Some(tag) = auth_tag {
+        tags.push(tag.clone());
+    }
+
+    Ok(EventBuilder::new(nostr::Kind::Authentication, "")
+        .tags(tags)
+        .custom_created_at(created_at)
+        .sign_with_keys(keys)?)
 }
 
 /// Convert a WebSocket URL to its HTTP equivalent.
@@ -3839,15 +3994,23 @@ async fn do_connect(
     relay_url: &str,
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
+    auth_clock: &RelayAuthClock,
 ) -> Result<(WsStream, VecDeque<RelayMessage>), RelayError> {
     let parsed = relay_url
         .parse::<url::Url>()
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    let request_started_unix_millis = system_time_unix_millis();
+    let (ws, response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+    let response_received_unix_millis = system_time_unix_millis();
+    if let (Some(started), Some(received)) =
+        (request_started_unix_millis, response_received_unix_millis)
+    {
+        auth_clock.update_from_handshake(relay_url, response.headers(), started, received);
+    }
     debug!("connected to relay at {relay_url}");
 
     let mut ws = ws;
@@ -3855,7 +4018,15 @@ async fn do_connect(
 
     let challenge = wait_for_auth_challenge(&mut ws, &mut buffer, AUTH_TIMEOUT).await?;
 
-    send_auth_response(&mut ws, &challenge, relay_url, keys, auth_tag).await?;
+    send_auth_response(
+        &mut ws,
+        &challenge,
+        relay_url,
+        keys,
+        auth_tag,
+        auth_clock.now(),
+    )
+    .await?;
 
     let event_id = {
         // We need the event_id that was just sent. Re-derive it by signing again
@@ -4007,6 +4178,148 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn relay_date_headers(name: &'static str, value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(name, value.parse().expect("valid test header"));
+        headers
+    }
+
+    #[test]
+    fn relay_clock_accepts_standard_date_with_midpoint_compensation() {
+        let headers = relay_date_headers("date", "Wed, 12 Aug 2026 18:05:13 GMT");
+        let remote_ms = chrono::DateTime::parse_from_rfc2822("Wed, 12 Aug 2026 18:05:13 GMT")
+            .unwrap()
+            .timestamp_millis();
+
+        let offset = derive_relay_clock_offset(
+            "wss://relay.example.com",
+            &headers,
+            remote_ms - 7_201_000,
+            remote_ms - 7_199_000,
+        );
+
+        assert_eq!(offset, Some(7_200));
+    }
+
+    #[test]
+    fn relay_clock_accepts_production_cdate_header() {
+        let headers = relay_date_headers("cdate", "Wed, 12 Aug 2026 18:05:13 GMT");
+        let remote_ms = chrono::DateTime::parse_from_rfc2822("Wed, 12 Aug 2026 18:05:13 GMT")
+            .unwrap()
+            .timestamp_millis();
+
+        assert_eq!(
+            derive_relay_clock_offset(
+                "wss://relay.example.com",
+                &headers,
+                remote_ms - 7_200_000,
+                remote_ms - 7_200_000,
+            ),
+            Some(7_200)
+        );
+    }
+
+    #[test]
+    fn relay_clock_rejects_untrusted_or_unbounded_samples() {
+        let valid = relay_date_headers("date", "Wed, 12 Aug 2026 18:05:13 GMT");
+        let malformed = relay_date_headers("date", "not-a-date");
+        let missing = HeaderMap::new();
+        let remote_ms = chrono::DateTime::parse_from_rfc2822("Wed, 12 Aug 2026 18:05:13 GMT")
+            .unwrap()
+            .timestamp_millis();
+
+        assert_eq!(
+            derive_relay_clock_offset("ws://relay.example.com", &valid, remote_ms, remote_ms),
+            None
+        );
+        assert_eq!(
+            derive_relay_clock_offset("wss://relay.example.com", &malformed, 0, 0),
+            None
+        );
+        assert_eq!(
+            derive_relay_clock_offset("wss://relay.example.com", &missing, 0, 0),
+            None
+        );
+        assert_eq!(
+            derive_relay_clock_offset(
+                "wss://relay.example.com",
+                &valid,
+                remote_ms - 86_401_000,
+                remote_ms - 86_401_000,
+            ),
+            None
+        );
+        assert_eq!(
+            derive_relay_clock_offset(
+                "wss://relay.example.com",
+                &valid,
+                remote_ms - 31_000,
+                remote_ms,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn adjusted_auth_timestamp_saturates_at_unix_epoch() {
+        assert_eq!(adjusted_auth_timestamp(10, -20).as_secs(), 0);
+        assert_eq!(adjusted_auth_timestamp(u64::MAX, 1).as_secs(), u64::MAX);
+        assert_eq!(adjusted_auth_timestamp(100, 7_200).as_secs(), 7_300);
+    }
+
+    #[test]
+    fn nip42_builder_uses_supplied_auth_timestamp_and_required_tags() {
+        let keys = Keys::generate();
+        let created_at = nostr::Timestamp::from_secs(1_786_558_713);
+        let auth_tag = nostr::Tag::parse(["auth", "owner", "", "signature"]).unwrap();
+        let event = build_nip42_auth_event(
+            "challenge-123",
+            "wss://relay.example.com",
+            &keys,
+            Some(&auth_tag),
+            created_at,
+        )
+        .unwrap();
+
+        assert_eq!(event.kind, Kind::Authentication);
+        assert_eq!(event.created_at, created_at);
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["challenge", "challenge-123"]));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["relay", "wss://relay.example.com"]));
+        assert!(event.tags.iter().any(|tag| tag == &auth_tag));
+        event.verify().unwrap();
+    }
+
+    #[test]
+    fn nip98_builder_uses_clock_offset_only_for_auth_event() {
+        use base64::Engine;
+
+        let local_secs = 1_786_551_513;
+        let client = RestClient {
+            http: reqwest::Client::new(),
+            base_url: "https://relay.example.com".into(),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+            auth_clock: RelayAuthClock::with_offset(7_200),
+        };
+        let encoded = client
+            .sign_nip98_at("POST", "https://relay.example.com/query", None, local_secs)
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let event: Event = serde_json::from_slice(&decoded).unwrap();
+
+        assert_eq!(event.kind, Kind::HttpAuth);
+        assert_eq!(event.created_at.as_secs(), local_secs + 7_200);
+        event.verify().unwrap();
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
@@ -5561,9 +5874,14 @@ mod tests {
     #[tokio::test]
     async fn do_connect_wrong_scheme_is_terminal() {
         let keys = nostr::Keys::generate();
-        let err = do_connect("https://example.com", &keys, None)
-            .await
-            .unwrap_err();
+        let err = do_connect(
+            "https://example.com",
+            &keys,
+            None,
+            &RelayAuthClock::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(
             is_terminal_connect_error(&err),
             "wrong-scheme URL should be terminal, got: {err}"
