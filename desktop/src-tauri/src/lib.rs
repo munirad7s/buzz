@@ -144,7 +144,6 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Deep mesh-llm futures need the same 8 MiB worker stacks used upstream.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
