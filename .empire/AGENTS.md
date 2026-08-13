@@ -359,46 +359,29 @@ Exit-Codes beantworten nur die **Erhebung**, nie die Lage: `0` vollständig · `
 
 ## Codex-Harness auf Munirs ChatGPT-Abo (buzz#18 — config-only, kein Fork-Code)
 
-**Befund: Der Abo-Weg ist vollständig verdrahtet und serverseitig bestätigt. Blockiert ist heute allein das Kontingent, nicht die Auth.**
+**Befund 2026-08-13: Der Abo-Weg ist end-to-end grün. Der frühere Kontingent-Blocker ist abgelaufen; der Dispatcher hat im echten `#build`-Thread über ChatGPT-OAuth geantwortet.**
 
-Der Buzz-eigene `buzz-agent` kann kein ChatGPT-Abo (`crates/buzz-acp/README.md`: OpenAI-Provider braucht API-Key). Das Abo trägt ausschließlich über den **Codex-HARNESS**: Buzz spricht ACP mit dem Adapter `@agentclientprotocol/codex-acp`, der wiederum die Codex-Engine startet, und die authentifiziert sich per OAuth gegen Munirs ChatGPT-Konto.
+Der Buzz-eigene `buzz-agent` kann kein ChatGPT-Abo (`crates/buzz-acp/README.md`: OpenAI-Provider braucht API-Key). Das Abo trägt ausschließlich über den **Codex-HARNESS**: Buzz spricht ACP mit `@agentclientprotocol/codex-acp`; der Adapter startet die Codex-Engine, die sich per OAuth gegen Munirs ChatGPT-Konto authentifiziert.
 
-### Auth-Kette (gemessen 2026-08-01, jede Stufe einzeln belegt)
+### Auth-Kette und Live-Beweis (gemessen 2026-08-13)
 
 | Stufe | Was läuft | Beleg |
 |---|---|---|
-| Agent | `codex` (Runtime `codex`, Modell `gpt-5.6-sol`, `respond_to: owner-only`) | Agent-Record in `%APPDATA%\xyz.block.buzz.app\agents\managed-agents.json` |
-| Transport | `buzz-acp.exe` ↔ Relay `wss://…communities.buzz.xyz`, Agent-Pool 10 | Agent-Log: `connected to relay`, `agent_pool_ready agents=10` |
-| Adapter | `@agentclientprotocol/codex-acp` **1.1.7** (aktuellste npm-Version) | ACP-`initialize`: `agentInfo.name`/`version` |
-| Engine | gebündeltes `@openai/codex` 0.145.0 im Adapter (unabhängig von der CLI 0.146.0 auf der Maschine) | `package.json` des Adapters |
-| Auth | `auth_mode = "chatgpt"`, `OPENAI_API_KEY = null`, OAuth-Tokens vorhanden | `~/.codex/auth.json` (nur Schlüssel gelesen, nie Werte) |
+| Agent | `dispatcher` (Runtime `codex`, Modell `gpt-5.6-sol`, `respond_to: owner-only`) | aktiver Agent-Record in `%APPDATA%\xyz.block.buzz.app\agents\managed-agents.json` |
+| Transport | `buzz-acp.exe` ↔ `wss://adaswin.communities.buzz.xyz`, Agent-Pool 10 | Desktop-Log: `connected to relay`, `agent_pool_ready agents=10`, Subscription auf `#build` |
+| Adapter | `@agentclientprotocol/codex-acp` **1.1.7** | ACP-`initialize`: `agentInfo.name`/`version`; Auth-Methode `chat-gpt` |
+| Auth | `codex login status` → `Logged in using ChatGPT`; `OPENAI_API_KEY = null` | `~/.codex-buzz/auth.json` ist Hardlink auf `~/.codex/auth.json`; nur Struktur/Link geprüft, nie Tokenwerte |
+| Kanal | Owner-Mention im bestehenden `#build`-Root → Dispatcher-Reply `CHATGPT_ABO_OK` | Antwort-Event `409e4fa2391a6da72a0cba9a438ef8c2ce1a37bbc820493ba4a9242f00eef470`, korrekte Agenten-Pubkey und Root-Referenz |
 
-**Wo der Adapter liegt — nicht in den globalen npm-Prefix schauen:** Buzz installiert seine Node-Werkzeuge nach `%APPDATA%\Buzz\node-tools\` (`managed_node_paths.rs`) und startet `…\node-tools\codex-acp.cmd`. `which codex-acp` in der Shell liefert deshalb **nichts**, obwohl der Adapter installiert und in Benutzung ist. Kein globales `npm install -g` nötig — und damit auch keine Volta-Stale-Falle.
+Für die Rot-Probe wurde `OPENAI_API_KEY` vor dem Harness-Start explizit aus der Kindprozess-Umgebung entfernt. Trotzdem starteten alle zehn ACP-Instanzen, der Turn lief vollständig und die signierte Antwort landete im Relay. Das prüft mehr als eine Konfigurationsdatei: Auth, Modellaufruf, Agenten-Turn und Kanalzustellung waren tatsächlich aktiv.
 
-### Beweis, dass KEIN API-Key im Spiel ist (vier unabhängige Schichten)
+**Wo der Adapter liegt — nicht in den globalen npm-Prefix schauen:** Buzz installiert seine Node-Werkzeuge nach `%APPDATA%\Buzz\node-tools\` (`managed_node_paths.rs`) und startet `…\node-tools\codex-acp.cmd`. `which codex-acp` in der Shell liefert deshalb **nichts**, obwohl der Adapter installiert und in Benutzung ist. Kein globales `npm install -g` nötig.
 
-1. `~/.codex/auth.json`: `OPENAI_API_KEY = null`, `auth_mode = "chatgpt"`.
-2. Windows-Env: `OPENAI_API_KEY` ist in **Process**, **User** und **Machine** leer; kein einziges `*OPENAI*`/`*CODEX*`-Env-Var gesetzt.
-3. Buzz injiziert nichts: `agents/global-agent-config.json` hat `env_vars: {}`, der Agent-Record keine Env-Overrides.
-4. `~/.codex/config.toml` enthält **keinen** `model_providers`-Block, kein `env_key`, kein `api_key`, keine `base_url`.
+### Windows-Zeitfalle
 
-**Der stärkste Beleg kommt vom Server, nicht von der Konfiguration** (Detektor, der rot werden kann): ein Prompt mit `-m gpt-5.6-codex-mini` wird mit
-`400 invalid_request_error: The 'gpt-5.6-codex-mini' model is not supported when using Codex with a ChatGPT account.`
-abgelehnt. Diese Fehlermeldung existiert auf dem API-Key-Pfad nicht — OpenAI selbst bestätigt damit, dass die Anfrage aus einem **ChatGPT-Konto** kam.
+Der Windows-Prozess meldet lokale CEST fälschlich als UTC; NIP-98-POSTs aus der Windows-CLI werden deshalb vom Relay mit ungefähr `7200s` Abweichung abgelehnt. Der WebSocket-Harness kompensiert den authentifizierten Relay-Offset selbst (`accepted authenticated relay clock offset`) und arbeitet normal. Für den einmaligen Test wurde nur der vorhandene UTC-Signer unter WSL genutzt; Systemzeit und Relay-Sicherheitsfenster wurden nicht verändert.
 
-### Der echte Blocker: Abo-Kontingent erschöpft (nicht die Auth)
-
-`session/new` gelingt, der Adapter liefert die Modellliste (`gpt-5.6-sol[low|medium|high]` …) — erst `session/prompt` scheitert. Was `buzz-acp` als nichtssagendes `Agent reported error (code -32603): Internal error` protokolliert, ist im ACP-Rohantwort-Feld `data` eindeutig:
-
-```json
-{"code":-32603,"message":"Internal error",
- "data":{"message":"You've hit your usage limit. … or try again at Aug 8th, 2026 9:14 AM.",
-         "codexErrorInfo":"usageLimitExceeded"}}
-```
-
-Konsequenz: Der Kanal-Beweis („codex beantwortet eine echte Aufgabe in #build") ist **bis zum Kontingent-Reset am 2026-08-08 09:14 nicht führbar** — ohne Zukauf von Credits bzw. Pro-Upgrade. Nach Doktrin wurde **kein API-Key-Fallback** aktiviert. `buzz-acp` requeued den Auftrag mit Backoff (bis `attempt=10`) und gibt dann auf; die Nachricht geht verloren, der Agent bleibt gesund (`pipe intact`, kein Respawn).
-
-**Diagnose-Rezept für „-32603 Internal error"** (buzz-acp verschluckt das `data`-Feld): Adapter direkt über stdio ansprechen — newline-delimited JSON-RPC, `initialize` → `session/new` (`{cwd, mcpServers: []}`) → `session/prompt`. Die volle Fehlerursache steht in `error.data.codexErrorInfo`.
+Der frühere `usageLimitExceeded`-Befund vom 2026-08-01 bleibt als historische Diagnose nützlich, ist aber **kein offener Blocker mehr**. Bei einem erneuten `-32603 Internal error` steht die Providerursache seit buzz#39 im Log; kein API-Key-Fallback und kein Credit-Zukauf.
 
 ### Betrieb: Erneuerung, Logout, Wiederanlauf
 
@@ -1072,12 +1055,12 @@ Skills analog: statt 61 verworfener Beschreibungen liegen sechs Junctions in `~/
 | 4 | **Rot-Probe** — dieselbe Messstrecke gegen `~/.codex` | Fehler und Warnung sofort wieder da (205,5 s, 18, 1) |
 | 4b | **Rot-Probe Wächter** — Kopie statt Hardlink · Home fehlt | je Exit 1 mit benanntem Grund; grüner Lauf Exit 0 |
 | 5 | Gegenprobe Munir-Setup | `codex login status` → „Logged in using ChatGPT"; `config.toml` **byte-identisch** wieder bei 17.891 Bytes, 26 mcp_servers, 40 plugins |
-| 6 | Kanal-Beweis `@codex` in `#build` | **offen — braucht Abo-Kontingent (Reset 08.08. 09:14, buzz#18)** |
+| 6 | Kanal-Beweis `@dispatcher` in `#build` | **grün 2026-08-13** — Antwort `CHATGPT_ABO_OK`, Event `409e4fa2391a6da72a0cba9a438ef8c2ce1a37bbc820493ba4a9242f00eef470` |
 
 **Zwei Dinge, die nicht behauptet werden:**
 
 - Die Messung selbst hat Munirs `config.toml` verändert: `codex exec` trägt für jedes neue Arbeitsverzeichnis still einen `[projects.…]`-Trust-Eintrag nach (+144 Bytes). Der Eintrag wurde **entfernt**, die Datei steht wieder exakt auf ihren 17.891 Ausgangsbytes. Wer in fremden `CODEX_HOME`s misst, verändert sie — das ist kein Nebensatz, sondern der Grund, warum die Gegenprobe zur Pflicht gehört.
-- Der **laufende** Agent hat das neue Home noch nicht: die Desktop-Instanz startete um 12:38 und schreibt bis heute in `~/.codex/sessions/` (12 Rollout-Dateien seit 12:30, davon 10 aus dem Pool-Start um 13:45). `env_vars` wird beim **nächsten Start** gelesen; ein Neustart hätte die produktive App bedienen müssen und wurde deshalb nicht erzwungen. Der Detektor dafür ist einzeilig: nach dem nächsten Start liegen die Rollouts unter `~/.codex-buzz/sessions/` und `~/.codex/sessions/` wächst nicht mehr mit.
+- Der laufende Dispatcher nutzt das isolierte Home jetzt nachweislich: der echte Kanal-Turn vom 2026-08-13 liegt unter `~/.codex-buzz/sessions/`; der Desktop hat den Agenten danach erneut mit derselben `CODEX_HOME`-Verdrahtung gestartet.
 ## Multi-Maschinen-Betrieb: eigene Agenten je Gerät (buzz#22)
 
 **Entschieden: zweites Gerät = headless `buzz-acp` auf adas-hetzner (systemd), Identitäten strikt pro Gerät, Beweise auf dem eigenen Relay `buzz.adas.casa`.** Munirs Mac stand nicht zur Verfügung; das Ticket nennt den Server ausdrücklich als gleichwertige Zweitmaschine. Runbook: `.empire/ONBOARDING.md`. Gate-Regel: `.empire/POLICY.md`, Abschnitt „Owner-Gate über Gerätegrenzen".
@@ -1113,7 +1096,7 @@ Anzeigename = **Rolle** (`Scout`, `Sentry`); Profil-Bio + Team = **Betreiber + G
 ### Offene Beweise (ehrlich benannt, nicht grün gemeldet)
 
 - **Mac als drittes Gerät** ist nicht durchgemessen — kein Zugriff in dieser Session. ONBOARDING.md §4.6 beschreibt den Weg, markiert ihn aber als unbewiesen.
-- **Abo-Anbindung per `codex login` auf Gerät 2** ist nicht bewiesen: das ChatGPT-Wochenkontingent ist bis 2026-08-08 erschöpft (buzz#18) und der Server hat keinen Browser für den OAuth-Flow. Der Device-Code-Weg ist dokumentiert, nicht gemessen. Gerät 2 belegt „eigener Zugang je Gerät" deshalb über einen eigenen Provider-Key, nicht über ein zweites Abo.
+- **Abo-Anbindung per `codex login` auf Gerät 2** ist nicht bewiesen: der lokale Windows-Dispatcher nutzt das ChatGPT-Abo inzwischen end-to-end (buzz#18), der Server hat aber weiterhin keinen durchgeführten OAuth-Flow. Der Device-Code-Weg ist dokumentiert, nicht gemessen. Gerät 2 belegt „eigener Zugang je Gerät" deshalb über einen eigenen Provider-Key, nicht über ein zweites Abo.
 - **Zweites menschliches Mitglied** existiert nicht; beide Geräte gehören Munir. Owner beider Agenten ist deshalb dieselbe Identität. Die Owner-Gate-Regel ist so formuliert, dass ein zweiter Owner nichts daran ändert — bewiesen ist sie aber nur mit einem.
 
 ### Fallen, die dieses Ticket gekostet hat
