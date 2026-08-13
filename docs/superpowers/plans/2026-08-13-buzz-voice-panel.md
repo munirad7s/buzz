@@ -79,7 +79,7 @@ git push
 - Consumes: newline-delimited JSON-RPC messages from `codex app-server`.
 - Produces: `RpcRequestId`, `ServerMessage`, `RealtimeEvent`, `classify_server_message(Value)`, and sanitized `VoiceErrorKind` values.
 
-- [ ] **Step 1: Write failing protocol tests**
+- [x] **Step 1: Write failing protocol tests**
 
 ```rust
 #[test]
@@ -94,7 +94,7 @@ fn matching_sdp_notification_is_success_data() {
 }
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::protocol_tests
@@ -102,11 +102,11 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::protoco
 
 Expected: FAIL because `voice_assistant` and parser types do not exist.
 
-- [ ] **Step 3: Implement the minimum parser and error classifier**
+- [x] **Step 3: Implement the minimum parser and error classifier**
 
 Parse responses by numeric `id`; parse `thread/realtime/sdp` and `thread/realtime/error` notifications by `threadId`; reject malformed lines as `VoiceErrorKind::Protocol`; classify 403/login/quota text into stable UI codes without retaining raw credential-bearing text.
 
-- [ ] **Step 4: Run GREEN and format**
+- [x] **Step 4: Run GREEN and format**
 
 ```bash
 cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::protocol_tests
@@ -115,7 +115,7 @@ cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
 
 Expected: focused tests PASS and format check exits 0.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add desktop/src-tauri/src/voice_assistant desktop/src-tauri/src/lib.rs

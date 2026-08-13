@@ -35,6 +35,7 @@ mod templates;
 #[cfg(target_os = "macos")]
 mod tray_menu;
 mod util;
+mod voice_assistant;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
