@@ -73,6 +73,7 @@ use tauri::{Listener, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
+use voice_assistant::{voice_start, voice_stop, VoiceAssistantState};
 
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
@@ -369,6 +370,7 @@ pub fn run() {
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
+        .manage(VoiceAssistantState::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -668,6 +670,8 @@ pub fn run() {
             acknowledge_pending_community_deep_link,
             read_empire_snapshot,
             refresh_empire_snapshot,
+            voice_start,
+            voice_stop,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,

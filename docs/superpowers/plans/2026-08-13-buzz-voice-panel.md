@@ -134,11 +134,11 @@ git push
 - Consumes: `CodexTransport` with async `send(Value)` and `recv()` methods, local SDP, instructions, and snapshot text.
 - Produces: `VoiceClient::start(sdp, snapshot) -> Result<VoiceStartResponse, VoiceCommandError>` and `VoiceClient::stop(thread_id) -> Result<(), VoiceCommandError>`.
 
-- [ ] **Step 1: Write scripted-transport lifecycle tests**
+- [x] **Step 1: Write scripted-transport lifecycle tests**
 
 Cover initialize, `thread/start`, `thread/realtime/start`, acknowledgement before SDP, matching error, timeout, process exit, wrong-thread notification, and idempotent stop. Assert the thread request contains `approvalPolicy: "never"`, `sandbox: "read-only"`, no tools, voice `spruce`, and the supplied snapshot only inside initial instructions.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::client_tests
@@ -146,11 +146,11 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::client_
 
 Expected: FAIL because `VoiceClient` and `CodexTransport` do not exist.
 
-- [ ] **Step 3: Implement actor and production process transport**
+- [x] **Step 3: Implement actor and production process transport**
 
 Spawn `codex app-server --stdio --enable realtime_conversation` with piped stdin/stdout, null stderr, `OPENAI_API_KEY` removed, and `CREATE_NO_WINDOW` on Windows. Initialize once, serialize writes, route responses by ID, wait up to 30 seconds for matching SDP, and kill/reap the child on protocol failure or drop.
 
-- [ ] **Step 4: Run GREEN and focused clippy**
+- [x] **Step 4: Run GREEN and focused clippy**
 
 ```bash
 cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::client_tests
@@ -159,7 +159,7 @@ cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --lib -- -D warnings
 
 Expected: lifecycle tests PASS; no branch-caused warning in the new module.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add desktop/src-tauri/src/voice_assistant
@@ -181,11 +181,11 @@ git push
 - Consumes: reusable cockpit envelope loader, `query_relay(&AppState, filters)`, and `VoiceClient`.
 - Produces: `build_voice_snapshot(&AppState) -> VoiceSnapshot`, `voice_start`, `voice_stop`, and managed `VoiceAssistantState`.
 
-- [ ] **Step 1: Write failing snapshot and command tests**
+- [x] **Step 1: Write failing snapshot and command tests**
 
 Test complete and partial sources, missing cockpit, relay failure, named gaps, stable ordering, UTF-8 input crossing 16 KiB, exact byte ceiling, fake-client start/stop forwarding, blank SDP rejection, and mismatched thread stop rejection.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::snapshot_tests voice_assistant::commands_tests
@@ -193,11 +193,11 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant::snapsho
 
 Expected: FAIL because snapshot builder and commands do not exist.
 
-- [ ] **Step 3: Implement the snapshot and commands**
+- [x] **Step 3: Implement the snapshot and commands**
 
 Expose a crate-private cockpit read helper, query only recent text events needed for a concise feed excerpt, sanitize and serialize selected fields, append named gaps, and truncate on a UTF-8 boundary to `16 * 1024` bytes. Register `VoiceAssistantState`, `voice_start`, and `voice_stop` in `lib.rs` without expanding command responsibilities elsewhere.
 
-- [ ] **Step 4: Run GREEN and Rust gates**
+- [x] **Step 4: Run GREEN and Rust gates**
 
 ```bash
 cargo test --manifest-path desktop/src-tauri/Cargo.toml voice_assistant
@@ -207,7 +207,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Expected: focused voice tests PASS; supported workspace clippy exits 0.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add desktop/src-tauri/src/voice_assistant desktop/src-tauri/src/commands/empire_cockpit.rs desktop/src-tauri/src/lib.rs

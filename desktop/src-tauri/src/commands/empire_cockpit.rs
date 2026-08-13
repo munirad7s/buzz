@@ -184,6 +184,12 @@ fn envelope_for(path: &Path, collector: Option<CollectorOutcome>) -> EmpireSnaps
     }
 }
 
+pub(crate) fn load_empire_snapshot_for_voice() -> Result<serde_json::Value, String> {
+    let path = snapshot_path()?;
+    let (snapshot, read_error, _) = load_snapshot(&path);
+    snapshot.ok_or_else(|| read_error.unwrap_or_else(|| "Snapshot nicht verfuegbar".to_string()))
+}
+
 /// Reads the current cockpit snapshot. Never fails for "no data" — that is a
 /// populated `readError`, which is what the UI must render as a gap.
 #[tauri::command]
