@@ -125,22 +125,12 @@ impl CodexProcess {
     }
 }
 
+#[derive(Default)]
 pub struct VoiceClient {
     process: Option<CodexProcess>,
     ids: RpcSequencer,
     initialized: bool,
     active_thread: Option<String>,
-}
-
-impl Default for VoiceClient {
-    fn default() -> Self {
-        Self {
-            process: None,
-            ids: RpcSequencer::default(),
-            initialized: false,
-            active_thread: None,
-        }
-    }
 }
 
 impl VoiceClient {
