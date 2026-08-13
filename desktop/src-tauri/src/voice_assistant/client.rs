@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::process::Stdio;
 
 use serde::Serialize;
@@ -129,7 +128,6 @@ impl CodexProcess {
 pub struct VoiceClient {
     process: Option<CodexProcess>,
     ids: RpcSequencer,
-    deferred: VecDeque<ServerMessage>,
     initialized: bool,
     active_thread: Option<String>,
 }
@@ -139,7 +137,6 @@ impl Default for VoiceClient {
         Self {
             process: None,
             ids: RpcSequencer::default(),
-            deferred: VecDeque::new(),
             initialized: false,
             active_thread: None,
         }
@@ -183,6 +180,9 @@ impl VoiceClient {
         tokio::time::timeout(REQUEST_TIMEOUT, async {
             loop {
                 match self.process().await?.receive().await? {
+                    ServerMessage::ServerRequest { id, method } => {
+                        self.answer_server_request(id, &method).await?;
+                    }
                     ServerMessage::Response {
                         id: response_id,
                         result,
@@ -194,7 +194,7 @@ impl VoiceClient {
                     } if response_id == id => {
                         return Err(VoiceCommandError { code, message });
                     }
-                    other => self.deferred.push_back(other),
+                    _ => {}
                 }
             }
         })
@@ -203,6 +203,37 @@ impl VoiceClient {
             code: VoiceErrorCode::Timeout,
             message: "Codex App-Server hat das Zeitlimit ueberschritten.".to_string(),
         })?
+    }
+
+    async fn answer_server_request(
+        &mut self,
+        id: u64,
+        method: &str,
+    ) -> Result<(), VoiceCommandError> {
+        let response = match method {
+            "currentTime/read" => json!({
+                "id": id,
+                "result": {"currentTimeAt": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()}
+            }),
+            "item/commandExecution/requestApproval" => {
+                json!({"id": id, "result": {"decision": "decline"}})
+            }
+            "item/fileChange/requestApproval" => {
+                json!({"id": id, "result": {"decision": "decline"}})
+            }
+            "item/tool/requestUserInput" => json!({"id": id, "result": {"answers": {}}}),
+            "mcpServer/elicitation/request" => {
+                json!({"id": id, "result": {"action": "decline", "content": null}})
+            }
+            _ => json!({
+                "id": id,
+                "error": {"code": -32601, "message": "Method not available in read-only voice mode"}
+            }),
+        };
+        self.process().await?.send(&response).await
     }
 
     async fn account_model(&mut self) -> Result<String, VoiceCommandError> {
@@ -263,20 +294,29 @@ impl VoiceClient {
             .as_str()
             .map(str::to_string)
             .ok_or_else(VoiceCommandError::protocol)?;
+        self.active_thread = Some(thread_id.clone());
 
         let start_id = self.ids.next_id();
-        self.process()
+        if let Err(error) = self
+            .process()
             .await?
             .send(&json!({
                 "id": start_id,
                 "method": "thread/realtime/start",
                 "params": realtime_start_params(&thread_id, sdp, snapshot)
             }))
-            .await?;
+            .await
+        {
+            self.stop(&thread_id).await?;
+            return Err(error);
+        }
 
         let answer = tokio::time::timeout(REQUEST_TIMEOUT, async {
             loop {
                 match self.process().await?.receive().await? {
+                    ServerMessage::ServerRequest { id, method } => {
+                        self.answer_server_request(id, &method).await?;
+                    }
                     ServerMessage::Response { id, .. } if id == start_id => {}
                     ServerMessage::ErrorResponse { id, code, message } if id == start_id => {
                         return Err(VoiceCommandError { code, message });
@@ -295,16 +335,28 @@ impl VoiceClient {
                     {
                         return Err(VoiceCommandError { code, message });
                     }
-                    other => self.deferred.push_back(other),
+                    _ => {}
                 }
             }
         })
-        .await
-        .map_err(|_| VoiceCommandError {
-            code: VoiceErrorCode::Timeout,
-            message: "Realtime-SDP blieb aus.".to_string(),
-        })??;
-        self.active_thread = Some(thread_id.clone());
+        .await;
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(_) => {
+                self.stop(&thread_id).await?;
+                return Err(VoiceCommandError {
+                    code: VoiceErrorCode::Timeout,
+                    message: "Realtime-SDP blieb aus.".to_string(),
+                });
+            }
+        };
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.stop(&thread_id).await?;
+                return Err(error);
+            }
+        };
         Ok(VoiceStartResponse {
             thread_id,
             sdp_answer: answer,

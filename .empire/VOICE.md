@@ -21,7 +21,7 @@ Issue #13 adds a read-only `/voice` surface backed by Codex Realtime through the
 - Snapshot inputs are the existing local cockpit contract plus a direct authenticated relay query.
 - Missing sources are named gaps; they are never represented as zero or healthy.
 - SDP, snapshot content, signing keys, auth tokens, environment values, and hidden paths are not logged.
-- Stop is idempotent and reaps the app-server child when the actor can no longer be reused safely.
+- Stop is idempotent and terminates the app-server child when the actor can no longer be reused safely.
 
 ## Visual system
 
@@ -79,3 +79,12 @@ The implementation takes four recurring decisions from this set:
 The supported Windows parity gate is the sequence documented in `.empire/BUILD.md`: workspace format and clippy, Tauri format, desktop and web checks, and unit tests. Whole-desktop Windows Tauri clippy findings already named there are baseline exceptions; warnings introduced by the voice module are not accepted.
 
 Live proof runs with `OPENAI_API_KEY` absent. Success requires a real `thread/realtime/sdp` notification, route rendering, deterministic WebRTC lifecycle coverage, and clean stop. Physical microphone interaction is recorded separately when desktop automation cannot grant the host device.
+
+## Local proof — 2026-08-14
+
+- A no-key `codex app-server --stdio --enable realtime_conversation` probe initialized through the existing ChatGPT login, started thread `019ffcb6…`, and received a real `thread/realtime/sdp` notification for `spruce` with no entitlement or quota error.
+- The focused Rust suite passed 12/12 tests after a fresh Tauri test build, including read-only params, acknowledgement-vs-SDP sequencing, sanitized errors, snapshot gaps, and the 16-KiB bound.
+- The focused frontend suite passed 7/7 tests, including WebRTC negotiation and failure cleanup.
+- Chromium E2E passed 1/1: sidebar navigation, `/voice`, `voice_start`, snapshot rendering, clean `voice_stop`, and zero page errors.
+- The E2E screenshot is [`voice-panel-live-proof.png`](voice-panel-live-proof.png), SHA-256 `6e9ec6202066d9cbc8b3aa42c94306658b648ec19dab4689063aefe510ee69e5`.
+- The browser fixture replaces the host microphone and peer connection deterministically; the no-key app-server probe supplies the local entitlement/SDP parity that browser automation cannot exercise through Tauri IPC.

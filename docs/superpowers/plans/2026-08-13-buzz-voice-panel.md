@@ -228,11 +228,11 @@ git push
 - Consumes: `navigator.mediaDevices`, `RTCPeerConnection`, and Tauri `voice_start`/`voice_stop`.
 - Produces: `createVoiceSession(callbacks)`, `normalizeRealtimeEvent(value)`, `classifyVoiceError(error)`, and typed Tauri wrappers.
 
-- [ ] **Step 1: Write failing frontend unit tests**
+- [x] **Step 1: Write failing frontend unit tests**
 
 Assert mono/echo-cancellation/noise-suppression constraints, SDP invocation payload, remote answer application, transcript variants, partial-start cleanup, stop invocation, 45-second inactivity cleanup, and distinct login/403/quota/permission/protocol labels.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cd desktop && pnpm test -- --test-name-pattern="voice"
@@ -240,11 +240,11 @@ cd desktop && pnpm test -- --test-name-pattern="voice"
 
 Expected: FAIL because voice modules do not exist.
 
-- [ ] **Step 3: Implement the minimal session and pure model**
+- [x] **Step 3: Implement the minimal session and pure model**
 
 Create the data channel before the offer, attach local tracks, add a hidden remote `Audio` element, normalize transcript deltas/completions, reset the inactivity timer on meaningful events, and make cleanup idempotent across every partial state.
 
-- [ ] **Step 4: Run GREEN and checks**
+- [x] **Step 4: Run GREEN and checks**
 
 ```bash
 cd desktop && pnpm test -- --test-name-pattern="voice" && pnpm typecheck && pnpm check
@@ -252,7 +252,7 @@ cd desktop && pnpm test -- --test-name-pattern="voice" && pnpm typecheck && pnpm
 
 Expected: voice tests PASS and all desktop checks exit 0 apart from already documented informational Biome hints outside changed files.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add desktop/src/features/voice/lib desktop/src/shared/api/tauriVoice.ts
@@ -275,11 +275,11 @@ git push
 - Consumes: `createVoiceSession`, generated visual references, preview feature gate, and router.
 - Produces: navigable `/voice` preview route with idle, permission, connecting, listening, speaking, stopping, and error views.
 
-- [ ] **Step 1: Write failing model/surface assertions**
+- [x] **Step 1: Write failing model/surface assertions**
 
 Test idle start control, disabled connecting state, active stop control, elapsed timer, user/assistant transcript excerpts, snapshot gaps, error recovery, route registration, sidebar active state, keyboard focus, and accessible status announcements.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cd desktop && pnpm test -- --test-name-pattern="VoicePanel|voice route"
@@ -287,11 +287,11 @@ cd desktop && pnpm test -- --test-name-pattern="VoicePanel|voice route"
 
 Expected: FAIL because route and screen do not exist.
 
-- [ ] **Step 3: Implement the screen from the visual set**
+- [x] **Step 3: Implement the screen from the visual set**
 
 Use an ink/graphite page, subtle CSS noise, warm amber active border glow, restrained cards, a large magnetic-feeling microphone button with reduced-motion fallback, responsive asymmetric columns, semantic buttons, `aria-live`, and no purple or decorative pill clutter.
 
-- [ ] **Step 4: Regenerate routes and run GREEN**
+- [x] **Step 4: Regenerate routes and run GREEN**
 
 ```bash
 cd desktop && pnpm build && pnpm test -- --test-name-pattern="VoicePanel|voice route" && pnpm check
@@ -299,7 +299,7 @@ cd desktop && pnpm build && pnpm test -- --test-name-pattern="VoicePanel|voice r
 
 Expected: generated tree includes `/voice`; tests, build, and checks PASS.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add desktop/src/features/voice desktop/src/app/routes/voice.tsx desktop/src/app/routes.ts desktop/src/app/routeTree.gen.ts desktop/src/features/sidebar/ui/AppSidebarPinnedHeader.tsx preview-features.json
@@ -318,11 +318,11 @@ git push
 - Consumes: `/voice`, Tauri bridge commands, browser media/WebRTC mocks, and the live local app-server.
 - Produces: screenshot/state proof plus recorded local no-key negotiation evidence.
 
-- [ ] **Step 1: Add bridge fixtures and E2E states**
+- [x] **Step 1: Add bridge fixtures and E2E states**
 
 Mock `voice_start` with `{ threadId: "voice-e2e", sdpAnswer: validFixture }`, record `voice_stop`, stub microphone permission, and prove idle, connecting, listening, entitlement-error, quota-error, stale-snapshot, and narrow-laptop layouts.
 
-- [ ] **Step 2: Run focused E2E**
+- [x] **Step 2: Run focused E2E**
 
 ```bash
 cd desktop && pnpm exec playwright test tests/e2e/voice-panel.spec.ts --project=smoke
@@ -330,7 +330,7 @@ cd desktop && pnpm exec playwright test tests/e2e/voice-panel.spec.ts --project=
 
 Expected: focused E2E PASS and screenshots show the generated design language.
 
-- [ ] **Step 3: Run the live no-key probe and local Tauri launch**
+- [x] **Step 3: Run the live no-key probe and local Tauri launch**
 
 ```powershell
 $env:OPENAI_API_KEY = $null
@@ -340,11 +340,11 @@ pnpm --dir desktop tauri dev
 
 Expected: ChatGPT login, `/voice` renders, and a start/stop session reaches an SDP answer. If microphone automation is unavailable, record that exact hardware boundary while retaining the real SDP notification and deterministic browser proof.
 
-- [ ] **Step 4: Update `.empire/VOICE.md` with exact evidence**
+- [x] **Step 4: Update `.empire/VOICE.md` with exact evidence**
 
 Record commands, timestamps in Europe/Berlin, result counts, visual manifest hash, live thread ID prefix only, and any physical microphone boundary. Do not record SDP or secrets.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add desktop/src/testing/e2eBridge.ts desktop/tests/e2e/voice-panel.spec.ts .empire/VOICE.md

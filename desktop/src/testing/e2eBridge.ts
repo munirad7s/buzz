@@ -12196,6 +12196,18 @@ export function maybeInstallE2eTauriMocks() {
         }
         return null;
       }
+      case "voice_start":
+        return {
+          threadId: "thread-e2e-voice",
+          sdpAnswer: "v=0\r\no=buzz 0 0 IN IP4 127.0.0.1\r\n",
+          snapshot: {
+            text: "Buzz read-only E2E snapshot",
+            gaps: ["Relay-Livefenster im Browser-Fixture nicht verbunden"],
+            truncated: false,
+          },
+        };
+      case "voice_stop":
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

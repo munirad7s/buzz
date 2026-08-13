@@ -3,6 +3,22 @@ use serde_json::json;
 use super::protocol::{classify_server_message, ServerMessage, VoiceErrorCode};
 
 #[test]
+fn server_request_is_distinct_from_a_response() {
+    assert_eq!(
+        classify_server_message(json!({
+            "id": 2,
+            "method": "item/tool/requestUserInput",
+            "params": {"questions": []}
+        }))
+        .unwrap(),
+        ServerMessage::ServerRequest {
+            id: 2,
+            method: "item/tool/requestUserInput".to_string()
+        }
+    );
+}
+
+#[test]
 fn start_ack_is_not_an_sdp_answer() {
     assert_eq!(
         classify_server_message(json!({"id": 3, "result": {}})).unwrap(),

@@ -31,6 +31,10 @@ impl VoiceCommandError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
+    ServerRequest {
+        id: u64,
+        method: String,
+    },
     Response {
         id: u64,
         result: Value,
@@ -93,6 +97,12 @@ fn classify_error(value: &Value) -> (VoiceErrorCode, String) {
 
 pub fn classify_server_message(value: Value) -> Result<ServerMessage, VoiceCommandError> {
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
+        if let Some(method) = value.get("method").and_then(Value::as_str) {
+            return Ok(ServerMessage::ServerRequest {
+                id,
+                method: method.to_string(),
+            });
+        }
         if let Some(error) = value.get("error") {
             let (code, message) = classify_error(error);
             return Ok(ServerMessage::ErrorResponse { id, code, message });
