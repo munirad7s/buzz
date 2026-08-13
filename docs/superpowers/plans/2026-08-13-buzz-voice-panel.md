@@ -33,11 +33,11 @@
 - Consumes: the ten states and visual direction from the design spec.
 - Produces: ten local PNG references and a manifest consumed by frontend implementation and documentation.
 
-- [ ] **Step 1: Generate one horizontal image per state**
+- [x] **Step 1: Generate one horizontal image per state**
 
 Use the built-in keyless image-generation tool ten times with a shared prompt suffix: `ink graphite desktop application, warm amber signal, neutral Swiss typography, subtle noise gradient, asymmetric premium layout, no purple, no gradients behind text, 16:9 horizontal UI reference`. Prefix each prompt with the exact state: idle, microphone permission, connecting, listening, user transcript, assistant speaking, entitlement denied, quota unavailable, stale snapshot, narrow laptop.
 
-- [ ] **Step 2: Store and hash each generated original**
+- [x] **Step 2: Store and hash each generated original**
 
 ```powershell
 Get-FileHash -Algorithm SHA256 .empire/voice-visuals/*.png | Sort-Object Path
@@ -45,11 +45,11 @@ Get-FileHash -Algorithm SHA256 .empire/voice-visuals/*.png | Sort-Object Path
 
 Expected: exactly ten distinct PNG paths and ten non-empty SHA-256 hashes.
 
-- [ ] **Step 3: Write the manifest and documentation**
+- [x] **Step 3: Write the manifest and documentation**
 
 `manifest.json` must contain `schemaVersion: 1`, `generationPath: "built-in-keyless-imagegen"`, `cost: "no-user-spend"`, and ten objects with `index`, `state`, `file`, `prompt`, and lowercase `sha256`. `.empire/VOICE.md` must describe preflight, architecture, security boundary, local proof commands, and embed all ten relative images.
 
-- [ ] **Step 4: Verify the visual evidence contract**
+- [x] **Step 4: Verify the visual evidence contract**
 
 ```powershell
 $manifest = Get-Content .empire/voice-visuals/manifest.json -Raw | ConvertFrom-Json
@@ -59,7 +59,7 @@ $manifest.references.Count
 
 Expected: `10` and `10`.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add .empire/VOICE.md .empire/voice-visuals
