@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-13T23:17:00+02:00",
+  "generationPath": "built-in-keyless-imagegen",
+  "cost": "no-user-spend",
+  "format": "horizontal PNG UI reference",
+  "sharedPrompt": "Ink and graphite Buzz desktop application, warm amber/honey signal, neutral Swiss editorial hierarchy, subtle noise texture, asymmetric premium layout, accessible contrast, simple cards, no purple, no blue AI gradients, no glassmorphism overload, no pill clutter, no logos, no watermark.",
+  "references": [
+    {
+      "index": 1,
+      "state": "idle",
+      "file": "01-idle.png",
+      "prompt": "Premium read-only voice command panel before microphone activation, with one dominant circular microphone control, quiet snapshot status, concise read-only security cue, and restrained empty transcript area.",
+      "sha256": "524a07b9c6410b10bd695d7f2ced0807bf9aae31e3393a8c96cae528eb712512"
+    },
+    {
+      "index": 2,
+      "state": "microphone-permission",
+      "file": "02-microphone-permission.png",
+      "prompt": "Voice panel explaining that microphone access is needed, with a focused permission card, concise privacy note, and one dominant allow-microphone action.",
+      "sha256": "b8a124016a55b2a3642a89d6d6533f0f03c347c13a02f7c271b981e568fcdc7e"
+    },
+    {
+      "index": 3,
+      "state": "connecting",
+      "file": "03-connecting.png",
+      "prompt": "Voice panel during WebRTC and Codex Realtime negotiation, with restrained connection motion, snapshot preparation status, and disabled microphone control.",
+      "sha256": "51f63585a69a947e545f4947c32d0f158e2dc391cacf349b431354121981ca8a"
+    },
+    {
+      "index": 4,
+      "state": "listening",
+      "file": "04-listening.png",
+      "prompt": "Live read-only voice session with active amber waveform, elapsed time, snapshot freshness, transcript pane, and obvious stop control.",
+      "sha256": "d9a5a1ea3212aa7cba3c2b0ca438547bc67c53052a8a3f4bb14f3787c35dbf93"
+    },
+    {
+      "index": 5,
+      "state": "user-transcript",
+      "file": "05-user-transcript.png",
+      "prompt": "Live voice session where the user's latest phrase is the transcript focus while the microphone waveform remains active and earlier content is subdued.",
+      "sha256": "e8984344f07eb6b4b98285cb9959d649a9c1c8ed4dfec19ca6ec02d8950acba9"
+    },
+    {
+      "index": 6,
+      "state": "assistant-speaking",
+      "file": "06-assistant-speaking.png",
+      "prompt": "Read-only assistant actively replying, with amber response waveform, assistant transcript as focus, quieter user question, elapsed time, and stop control.",
+      "sha256": "4be9be52978855f87a0f77ac2f1342599164301fd0e3b523ffee93d89e074e73"
+    },
+    {
+      "index": 7,
+      "state": "entitlement-denied",
+      "file": "07-entitlement-denied.png",
+      "prompt": "Recoverable 403 entitlement error with inactive microphone, explicit no-paid-fallback message, preserved read-only snapshot status, and retry action.",
+      "sha256": "8c8a632ef4fd8f36d75099c0810b057eef66c00b557b1784089c3ecd23270ed7"
+    },
+    {
+      "index": 8,
+      "state": "quota-unavailable",
+      "file": "08-quota-unavailable.png",
+      "prompt": "Calm quota-unavailable state that refuses a paid fallback, keeps the latest snapshot visible, and offers a later retry action.",
+      "sha256": "e0b8bcc0176b511571f1786d384a889c69d3912dda975b8792694ff28cea4942"
+    },
+    {
+      "index": 9,
+      "state": "snapshot-gap",
+      "file": "09-snapshot-gap.png",
+      "prompt": "Partial-context state naming a stale cockpit snapshot and unavailable relay feed as explicit gaps, never as zero or healthy.",
+      "sha256": "debf86de498a50005cc6aba420d26b715366653bd68f6e5e51956bc6819fc0f9"
+    },
+    {
+      "index": 10,
+      "state": "narrow-laptop",
+      "file": "10-narrow-laptop.png",
+      "prompt": "Active listening panel compressed for a narrow laptop with compact navigation, stacked transcript and snapshot health, large stop control, and no horizontal overflow.",
+      "sha256": "3e116c0af8f770f8156374029d92dd3742cdf4f30e34231c753be06daa92f84a"
+    }
+  ]
+}

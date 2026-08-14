@@ -4,6 +4,7 @@ import {
   FolderGit2,
   Inbox,
   LayoutDashboard,
+  Mic,
   Zap,
 } from "lucide-react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
@@ -118,6 +119,27 @@ function EmpireCockpitMenuItem() {
   );
 }
 
+function VoicePanelMenuItem() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  return (
+    <FeatureGate feature="voicePanel">
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          data-testid="open-voice-view"
+          isActive={location.pathname.startsWith("/voice")}
+          onClick={() => void navigate({ to: "/voice" })}
+          tooltip="Voice"
+          type="button"
+        >
+          <Mic className="h-4 w-4" />
+          <SidebarMenuLabel>Voice</SidebarMenuLabel>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </FeatureGate>
+  );
+}
+
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
@@ -168,6 +190,7 @@ export function AppSidebarPrimaryMenu({
           </SidebarMenuItem>
         </FeatureGate>
         <EmpireCockpitMenuItem />
+        <VoicePanelMenuItem />
         <FeatureGate feature="projects">
           <SidebarMenuItem>
             <SidebarMenuButton

@@ -26,6 +26,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "voicePanel",
+      "name": "Voice Panel",
+      "description": "Read-only Codex Realtime briefing through the existing ChatGPT subscription",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",
